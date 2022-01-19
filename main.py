@@ -10,6 +10,7 @@ from stable_baselines3.ppo import PPO
 from image_processor import ImageProcessor
 import socket
 import time
+from rs_camera import Camera
 
 class PruningGUI(QMainWindow):
     def __init__(self, config):
@@ -17,6 +18,9 @@ class PruningGUI(QMainWindow):
 
         self.config = config
         self.test = self.config['test']
+        self.cam = None
+        if not self.config.get('test_camera', True):
+            self.cam = Camera(424, 240)
 
         # State variables for GUI
         self.waypoint_list = []
@@ -102,7 +106,14 @@ class PruningGUI(QMainWindow):
             waypoints = np.random.uniform(-1, 1, (10,3))
             self.reset_waypoints(waypoints)
         else:
-            raise NotImplementedError()
+            print('Loading set waypoints for Millrace robot!')
+            waypoints = [
+                [1.069, -1.401, -1.649, -0.178, 1.152, 3.182],
+                [0.804, -1.424, -1.634, -0.162, 1.416, 3.159],
+                [0.587, -1.484, -1.582, -0.153, 1.633, 3.142],
+                [0.333, -1.609, -1.462, -0.152, 1.886, 3.121],
+            ]
+            self.reset_waypoints(np.array(waypoints))
 
     def move_robot_next(self):
         if not len(self.waypoint_list) or self.current_waypoint is None:
@@ -119,18 +130,16 @@ class PruningGUI(QMainWindow):
     def move_robot(self, pt):
 
         # If pt is a 6-vector, will be interpreted as a joint state
-
-
-
         if not self.test or (self.test and self.config['use_dummy_socket']):
             msg = pt.tobytes()
             ADDRESS = self.config.get('socket_ip', 'localhost')
             PORT = self.config['move_server_port']
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             address = (ADDRESS, PORT)
+
             sock.connect(address)
             sock.sendall(msg)
-            response = np.frombuffer(sock.recv(1024), dtype=np.uint8)
+            response = sock.recv(1024)
             sock.close()
             print('Move server response: {}'.format(response))
         print('Moved robot to: {}'.format(', '.join(['{:.3f}'.format(x) for x in pt])))
@@ -164,7 +173,7 @@ class PruningGUI(QMainWindow):
 
     def acquire_images(self):
 
-        if self.test:
+        if self.config.get('test_camera'):
             path = self.config['dummy_image_path']
             file_format = self.config['dummy_image_format']
             start_frame = np.random.randint(0, 100)
@@ -173,7 +182,11 @@ class PruningGUI(QMainWindow):
             self.rgb_main = np.array(Image.open(os.path.join(path, file_format.format(frame=start_frame+1)))).astype(np.uint8)[:,:,:3]
 
         else:
-            raise NotImplementedError()
+
+            self.rgb_main = self.cam.acquire_image()[0]
+            self.move_robot(np.array([0.0, 0.01, 0]))
+            self.rgb_alt = self.cam.acquire_image()[0]
+            self.move_robot(self.waypoint_list[self.current_waypoint])
 
         self.image_window.update_image('Main RGB', self.rgb_alt, 256)
         self.image_window.update_image('Alt RGB', self.rgb_main, 256)
@@ -466,7 +479,9 @@ class SequentialButtonList(QVGroupBox):
 if __name__ == '__main__':
 
     config = {
-        'test': True,
+        # 'test': False,
+        'test': False,
+        'test_camera': False,
         # 'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\GanTrainingPairsWithCutters\train',
         # 'dummy_image_format': 'render_{}_randomized_{:05d}.png',
         'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\RealData\MartinDataCollection\20220109-141856-Downsized',
@@ -480,6 +495,9 @@ if __name__ == '__main__':
         'rl_model_path': r'C:\Users\davijose\PycharmProjects\pybullet-test\best_model_1_0.zip',
 
     }
+
+    if not config['test']:
+        config['socket_ip'] = '169.254.116.60'
 
     procs = []
     if config['test'] and config['use_dummy_socket']:
