@@ -2,7 +2,7 @@ import numpy as np
 from torchvision.transforms import Resize
 import torch
 import os
-
+import cv2
 
 
 class ImageProcessor:
@@ -37,10 +37,10 @@ class ImageProcessor:
     def process(self, img):
 
         # Image is assumed to be a H x W x C uint8 Numpy array
-        img_tensor = torch.from_numpy(img).permute(2,0,1)
 
         if self.flownet is not None:
             # Scale the image to the closest dimensions possible divisible by 64
+            img_tensor = torch.from_numpy(img).permute(2, 0, 1)
             img_tensor = self.flownet_resize(img_tensor).float()
 
             if self.last_img is None:
@@ -53,12 +53,10 @@ class ImageProcessor:
             self.last_flow = rgb_flow
             self.last_img = img_tensor
 
-            img_tensor = torch.cat([img_tensor, torch.from_numpy(rgb_flow).permute(2,0,1)], dim=0)
-
-        # # GAN accepts inputs as values between -1 and 1
-        img_tensor = (img_tensor / 255 - 0.5) * 2
+            img = np.dstack([img, cv2.resize(rgb_flow, (img.shape[1], img.shape[0]))])
 
         if self.gan is not None:
+            img_tensor = self.gan.process_input_numpy_array(img)
             img_tensor = self.gan_resize(img_tensor)
             seg = self.gan.forward(img_tensor)
         else:

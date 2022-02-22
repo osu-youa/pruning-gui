@@ -9,8 +9,14 @@ from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped, Point, PointStamped, Quaternion, Pose, TransformStamped
 from tf2_ros import TransformListener as TransformListener2, Buffer
 from tf2_geometry_msgs import do_transform_point
+from copy import deepcopy
+
+BASE_TF = None
 
 def process(received_array):
+
+    tool_frame = rospy.get_param('tool_frame')
+    base_frame = rospy.get_param('base_frame')
 
     success = 0
     if len(received_array) == 6:
@@ -20,24 +26,46 @@ def process(received_array):
         rez = plan_joints_srv(js, True)
         success = int(rez.success)
 
+        tf = retrieve_tf(tool_frame, base_frame)
+
+        global BASE_TF
+        BASE_TF = tf
+
     elif len(received_array) == 3:
 
         print('Received tool-frame point command')
 
-        tool_frame = rospy.get_param('tool_frame')
-        base_frame = rospy.get_param('base_frame')
-
-        import pdb
-        pdb.set_trace()
-
-        tf = retrieve_tf(tool_frame, base_frame)
+        tf = BASE_TF
         pose = tf_to_pose(tf, keep_header=True)
 
-        pt = PointStamped()
-        pt.point = Point(*received_array)
-        pt.header.frame_id = tool_frame
-        pt_world = do_transform_point(pt, tf)
+        pt_world = apply_tf_to_point_array(tf, received_array, tool_frame)
         pose.pose.position = pt_world.point
+
+        rez = plan_pose_srv(pose, True)
+        success = int(rez.success)
+
+
+    elif len(received_array) == 4:
+
+        print('Received tool-frame point command with z-offset')
+
+        # A tool-frame point command like in the case of len == 3, but also includes a desired z-offset
+        # The final point determined will be determined by the z-offset
+
+        pt_array = received_array[:3]
+        z_offset = received_array[3]
+
+        tf = BASE_TF
+        pose = tf_to_pose(tf, keep_header=True)
+
+        # First modify the tf to move it by the z-offset
+
+        pt_world = apply_tf_to_point_array(tf, np.array([0, 0, z_offset]), tool_frame).point
+        tf.translation.x, tf.translation.y, tf.translation.z = pt_world.x, pt_world.y, pt_world.z
+
+        # Using the transformed TF, process the received point
+        pt_approach = apply_tf_to_point_array(tf, pt_array, tool_frame).point
+        pose.pose.position = pt_approach
 
         rez = plan_pose_srv(pose, True)
         success = int(rez.success)
@@ -55,6 +83,14 @@ def process(received_array):
         print('Received unknown array of len {}, not taking any action'.format(len(received_array)))
 
     return success
+
+
+def apply_tf_to_point_array(tf, array, array_frame):
+    pt = PointStamped()
+    pt.point = Point(*array)
+    pt.header.frame_id = array_frame
+    tfed_pt = do_transform_point(pt, tf)
+    return tfed_pt
 
 
 def retrieve_tf(base_frame, target_frame, stamp = rospy.Time()):
@@ -111,7 +147,10 @@ if __name__ == '__main__':
 
         while True:
             print('Waiting for connection')
-            connection, client_address = sock.accept()
+            try:
+                connection, client_address = sock.accept()
+            except socket.timeout:
+                continue
             print('Connection accepted!')
 
             try:
