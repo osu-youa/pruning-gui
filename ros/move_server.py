@@ -12,6 +12,7 @@ from tf2_geometry_msgs import do_transform_point
 from copy import deepcopy
 
 BASE_TF = None
+BASE_JOINTS = None
 
 def process(received_array):
 
@@ -19,6 +20,7 @@ def process(received_array):
     base_frame = rospy.get_param('base_frame')
 
     success = 0
+
     if len(received_array) == 6:
         print('Received joint command')
         js = JointState()
@@ -29,7 +31,9 @@ def process(received_array):
         tf = retrieve_tf(tool_frame, base_frame)
 
         global BASE_TF
+        global BASE_JOINTS
         BASE_TF = tf
+        BASE_JOINTS = rospy.wait_for_message('/joint_states', JointState, timeout=0.5)
 
     elif len(received_array) == 3:
 
@@ -78,6 +82,20 @@ def process(received_array):
         pose.pose.orientation = Quaternion(*received_array[3:])
         rez = plan_pose_srv(pose, True)
         success = int(rez.success)
+
+    elif len(received_array) == 1:
+        code = received_array[0]
+        if code == 0:
+            # Retract to home pose
+            if BASE_JOINTS is not None:
+                success = plan_joints_srv(BASE_JOINTS, True)
+            else:
+                print('Cannot retract to base joints when none has been defined!')
+
+
+        else:
+            print('Unknown single code {}'.format(code))
+
 
     else:
         print('Received unknown array of len {}, not taking any action'.format(len(received_array)))

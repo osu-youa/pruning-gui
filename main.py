@@ -411,7 +411,8 @@ class PruningGUI(QMainWindow):
         if self.test:
             print('Cut!')
         else:
-            raise NotImplementedError()
+            print('No cutting will be done, will instead do retraction')
+            self.move_robot(np.array([0]))
 
 
 
