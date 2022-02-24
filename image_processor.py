@@ -4,6 +4,7 @@ import torch
 import os
 import cv2
 
+import time
 
 class ImageProcessor:
 
@@ -26,7 +27,8 @@ class ImageProcessor:
         self.gan_resize = None
         if gan_name is not None:
             from wrappers.pix2pix import Pix2PixGAN
-            self.gan = Pix2PixGAN(gan_name, input_nc=gan_input_channels, output_nc=gan_output_channels, output_size=output_size)
+            self.gan = Pix2PixGAN(gan_name, input_nc=gan_input_channels, output_nc=gan_output_channels, output_size=output_size,
+                                  epoch='best')
             self.gan_resize = Resize((256, 256), antialias=True)
 
 
@@ -72,20 +74,35 @@ class ImageProcessor:
 if __name__ == '__main__':
 
     processor = ImageProcessor((424,240), (128,128), use_flow=True, gan_name='orchard_cutterflowseg_pix2pix')
-    from PIL import Image
-    root = r'C:\Users\davijose\Pictures\TrainingData\GanTrainingPairsWithCutters\train'
-    test_1 = os.path.join(root, 'render_6_randomized_00000.png')
-    test_2 = os.path.join(root, 'render_6_randomized_00001.png')
 
-    img_1 = np.array(Image.open(test_1)).astype(np.uint8)[:,:,:3]
-    img_2 = np.array(Image.open(test_2)).astype(np.uint8)[:,:,:3]
+    # TESTING RUNTIMES
+    runtimes = []
+    for i in range(500):
+        img = np.random.randint(0, 256, (256, 256, 6))
+        start = time.time()
+        processor.gan.forward(img)
+        end = time.time()
+        runtimes.append(end-start)
 
-    out_1 = processor.process(img_1)
-    out_2 = processor.process(img_2)
+    avg = np.array(runtimes).mean()
+    print('Average runtime {:.5f}s'.format(avg))
+    print('(FPS: {:.2f})'.format(1/avg))
 
-    import matplotlib.pyplot as plt
-    plt.imshow(out_2)
-    plt.show()
 
-    plt.imshow(processor.last_flow)
-    plt.show()
+    # from PIL import Image
+    # root = r'C:\Users\davijose\Pictures\TrainingData\GanTrainingPairsWithCutters\train'
+    # test_1 = os.path.join(root, 'render_6_randomized_00000.png')
+    # test_2 = os.path.join(root, 'render_6_randomized_00001.png')
+    #
+    # img_1 = np.array(Image.open(test_1)).astype(np.uint8)[:,:,:3]
+    # img_2 = np.array(Image.open(test_2)).astype(np.uint8)[:,:,:3]
+    #
+    # out_1 = processor.process(img_1)
+    # out_2 = processor.process(img_2)
+    #
+    # import matplotlib.pyplot as plt
+    # plt.imshow(out_2)
+    # plt.show()
+    #
+    # plt.imshow(processor.last_flow)
+    # plt.show()

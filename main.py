@@ -29,6 +29,7 @@ class PruningGUI(QMainWindow):
         self.detections = []
         self.current_box = None
         self.last_click = None
+        self.cutter_mask_clicks = []
 
         # Loaded images
         self.rgb_main = None
@@ -38,6 +39,7 @@ class PruningGUI(QMainWindow):
         self.flow_img = None
         self.mask_img = None
         self.mask_detections = None
+        self.cutter_gt = None
 
         # Loaded utilites
         self.image_processor = None
@@ -60,8 +62,17 @@ class PruningGUI(QMainWindow):
         self.image_window = ImageDisplay([['Main RGB', 'Alt RGB'], ['Depth', 'Flow'], ['Mask', 'Boxes']],
                                          names=['RGB', 'Depth/Flow', 'Processed'])
         self.image_window.register_click_callback('Mask', self.mask_click_callback)
+        self.image_window.register_click_callback('Main RGB', self.cutter_mask_click_callback)
         self.image_window.setWindowTitle('Images')
         self.image_window.show()
+
+        self.preload()
+
+    def preload(self):
+        if os.path.exists('last_cutter_mask.png'):
+            self.cutter_gt = np.array(Image.open('last_cutter_mask.png'))
+            if len(self.cutter_gt.shape) > 2:
+                self.cutter_gt = self.cutter_gt.mean(axis=2).astype(np.uint8)
 
     def reset_waypoints(self, waypoint_list):
 
@@ -123,7 +134,8 @@ class PruningGUI(QMainWindow):
         if self.image_processor is not None:
             return
 
-        self.image_processor = ImageProcessor((424, 240), (128, 128), use_flow=True, gan_name=self.config['gan_name'])
+        self.image_processor = ImageProcessor((424, 240), (128, 128), use_flow=True, gan_name=self.config['gan_name'],
+                                              gan_output_channels=self.config.get('gan_output_channels', 3))
         self.rl_system = PPO.load(self.config['rl_model_path'])
 
     def load(self):
@@ -205,10 +217,10 @@ class PruningGUI(QMainWindow):
         if self.config.get('test_camera'):
             path = self.config['dummy_image_path']
             file_format = self.config['dummy_image_format']
-            start_frame = np.random.randint(0, 100)
+            start_frame = np.random.randint(5, 20)
 
             self.rgb_alt = np.array(Image.open(os.path.join(path, file_format.format(frame=start_frame)))).astype(np.uint8)[:,:,:3]
-            self.rgb_main = np.array(Image.open(os.path.join(path, file_format.format(frame=start_frame+1)))).astype(np.uint8)[:,:,:3]
+            self.rgb_main = np.array(Image.open(os.path.join(path, file_format.format(frame=start_frame+3)))).astype(np.uint8)[:,:,:3]
 
         else:
 
@@ -237,13 +249,16 @@ class PruningGUI(QMainWindow):
         self.mask_img = self.image_processor.process(self.rgb_main)
         self.flow_img = self.image_processor.last_flow
 
+        if self.cutter_gt is not None:
+            self.mask_img[:,:,-1] = cv2.resize(self.cutter_gt, (self.mask_img.shape[1], self.mask_img.shape[0]))
+
         self.image_window.update_image('Flow', self.flow_img, 256)
         self.image_window.update_image('Mask', self.mask_img, 256)
 
 
     def mask_click_callback(self, event):
 
-        coord = self.convert_click_coord(event)
+        coord = self.convert_click_coord(event, 'Mask')
         print(coord)
 
         if self.last_click is None:
@@ -269,19 +284,47 @@ class PruningGUI(QMainWindow):
 
                 yvals, xvals = np.where(valid_pix)
                 pix = np.array([xvals, yvals]).T + [x1, y1]
-                target = self.pc[pix[:,1], pix[:,0]].mean(axis=0)
+                if self.pc is not None:
+                    target = self.pc[pix[:,1], pix[:,0]].mean(axis=0)
+
+                else:
+                    print('No PC detected, filling with dummy detections')
+                    target = np.random.uniform(-1, 1, 3)
 
                 detection = (target, pix)
                 print('New target at: {:.3f}, {:.3f}, {:.3f}'.format(*target))
                 self.detections.append(detection)
+
                 self.reset_detections()
 
+    def cutter_mask_click_callback(self, event):
+        coord = self.convert_click_coord(event, 'Main RGB')
+        if not self.cutter_mask_clicks:
+            self.cutter_mask_clicks.append(coord)
+            print('Click at {} recorded!'.format(coord))
+            return
+        last_click = self.cutter_mask_clicks[-1]
+        if np.linalg.norm(np.array(last_click) - coord) < 4:
+            # Close the shape
+            pts = np.array(self.cutter_mask_clicks)
+            mask = np.zeros(self.rgb_main.shape[:2], dtype=np.uint8)
+            mask = cv2.fillPoly(mask, pts.reshape((1,-1,2)), (255,255,255))
 
-    def convert_click_coord(self, event):
+            Image.fromarray(mask).save('last_cutter_mask.png')
+            self.cutter_gt = mask
+            print('New cutter mask defined!')
+
+            self.cutter_mask_clicks = []
+        else:
+            self.cutter_mask_clicks.append(coord)
+            print('Click at {} recorded!'.format(coord))
+
+
+    def convert_click_coord(self, event, window):
         click_x = event.pos().x()
         click_y = event.pos().y()
 
-        pixmap_rect = self.image_window.labels['Mask'].pixmap().rect()
+        pixmap_rect = self.image_window.labels[window].pixmap().rect()
         pixmap_x = pixmap_rect.width()
         pixmap_y = pixmap_rect.height()
 
@@ -319,7 +362,7 @@ class PruningGUI(QMainWindow):
             if self.test:
                 path = self.config['dummy_image_path']
                 file_format = os.path.join(path, self.config['dummy_image_format'])
-                start_frame = np.random.randint(0, 100)
+                start_frame = np.random.randint(0, 40)
 
                 for i in range(np.random.randint(10, 30)):
                     file_path = file_format.format(frame=start_frame + i)
@@ -504,6 +547,11 @@ class ImageDisplay(QWidget):
         if width is None:
             width = img_array.shape[1]
 
+        if len(img_array.shape) == 2 or img_array.shape[2] == 1:
+            img_array = np.dstack([img_array] * 3)
+        elif img_array.shape[2] == 2:
+            img_array = np.dstack([img_array, img_array[:,:,1]])
+
         qimg = self.np_to_qimage(img_array)
         pixmap = QPixmap(qimg).scaledToWidth(width)
         self.labels[label].setPixmap(pixmap)
@@ -577,14 +625,17 @@ if __name__ == '__main__':
     config = {
         # 'test': False,
         'test': True,
-        'test_camera': False,
+        'test_camera': True,
         # 'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\GanTrainingPairsWithCutters\train',
         # 'dummy_image_format': 'render_{}_randomized_{:05d}.png',
-        'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\RealData\MartinDataCollection\20220109-141856-Downsized',
-        'dummy_image_format': '{frame:04d}-C.png',
+        # 'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\RealData\MartinDataCollection\20220109-141856-Downsized',
+        # 'dummy_image_format': '{frame:04d}-C.png',
+        'dummy_image_path': r'C:\Users\davijose\Pictures\frames',
+        'dummy_image_format': '{frame:03d}.jpg',
         
         
-        'gan_name': 'orchard_cutterflowseg_pix2pix',
+        'gan_name': 'synthetic_flow_cutter_pix2pix',
+        'gan_output_channels': 2,
         'use_dummy_socket': False,
         'move_server_port': 10000,
         'vel_server_port': 10001,
