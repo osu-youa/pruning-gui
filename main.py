@@ -13,15 +13,16 @@ import time
 from rs_camera import Camera
 import cv2
 
+import matplotlib.pyplot as plt
+from mpl_toolkits import mplot3d
+
+
 class PruningGUI(QMainWindow):
     def __init__(self, config):
         QMainWindow.__init__(self)
 
         self.config = config
         self.test = self.config['test']
-        self.cam = None
-        if not self.config.get('test_camera', True):
-            self.cam = Camera(640, 480)
 
         # State variables for GUI
         self.waypoint_list = []
@@ -31,20 +32,22 @@ class PruningGUI(QMainWindow):
         self.last_click = None
         self.cutter_mask_clicks = []
 
-        # Loaded images
-        self.rgb_main = None
-        self.rgb_alt = None
-        self.depth_img = None
-        self.pc = None
-        self.flow_img = None
-        self.mask_img = None
-        self.mask_detections = None
-        self.cutter_gt = None
+        self.thread = QThread(self)
+        self.thread.start()
+        self.camera_and_network_handler = CameraAndNetworkHandler(config)
+        self.camera_and_network_handler.moveToThread(self.thread)
+        # Connect signals
 
-        # Loaded utilites
-        self.image_processor = None
-        self.identifier = None
-        self.rl_system = None
+        self.camera_and_network_handler.moving_start_signal.connect(partial(self.handle_move, 0))
+        self.camera_and_network_handler.moving_end_signal.connect(partial(self.handle_move, 1))
+
+        # GUI setup
+        self.image_window = ImageDisplay([['Main RGB', 'Alt RGB'], ['Depth', 'Flow'], ['Mask', 'Boxes']],
+                                         names=['RGB', 'Depth/Flow', 'Processed'])
+        self.image_window.register_click_callback('Mask', self.mask_click_callback)
+        self.image_window.register_click_callback('Main RGB', self.cutter_mask_click_callback)
+        self.image_window.setWindowTitle('Images')
+        self.image_window.show()
 
         # Boilerplate setup
         self.setWindowTitle('Pruning GUI')
@@ -59,20 +62,20 @@ class PruningGUI(QMainWindow):
         top_level_layout.addLayout(middle_layout)
         top_level_layout.addLayout(right_side_layout)
 
-        self.image_window = ImageDisplay([['Main RGB', 'Alt RGB'], ['Depth', 'Flow'], ['Mask', 'Boxes']],
-                                         names=['RGB', 'Depth/Flow', 'Processed'])
-        self.image_window.register_click_callback('Mask', self.mask_click_callback)
-        self.image_window.register_click_callback('Main RGB', self.cutter_mask_click_callback)
-        self.image_window.setWindowTitle('Images')
-        self.image_window.show()
+        # # TESTING THREADS
+        # btn = QPushButton('Test thread')
+        # top_level_layout.addWidget(btn)
+        # btn.clicked.connect(self.do_thread_test)
 
-        self.preload()
 
-    def preload(self):
-        if os.path.exists('last_cutter_mask.png'):
-            self.cutter_gt = np.array(Image.open('last_cutter_mask.png'))
-            if len(self.cutter_gt.shape) > 2:
-                self.cutter_gt = self.cutter_gt.mean(axis=2).astype(np.uint8)
+
+
+        self.camera_and_network_handler.new_image_signal.connect(partial(self.image_window.update_image, width=256))
+        self.camera_and_network_handler.status_signal.connect(self.update_status)
+
+
+    def update_status(self, status):
+        self.status.setText(status)
 
     def reset_waypoints(self, waypoint_list):
 
@@ -98,14 +101,15 @@ class PruningGUI(QMainWindow):
             self.detection_status.setText('No detections')
             self.detection_combobox.setDisabled(True)
             self.detection_actions.disable_all()
+            self.image_window.update_image('Boxes', np.zeros((1,1,3), dtype=np.uint8))
             return
 
-        if self.mask_img is None:
+        if self.camera_and_network_handler.mask_img is None:
             raise Exception("Detections added but no mask has been generated!")
 
-        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255)]
-
-        annotated_mask = cv2.resize(self.mask_img, (self.rgb_main.shape[1], self.rgb_main.shape[0]))
+        colors = [(0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255)]
+        h, w = self.camera_and_network_handler.rgb_main.shape[:2]
+        annotated_mask = cv2.resize(self.camera_and_network_handler.mask_img, (w,h))
 
         for i, detection in enumerate(self.detections):
 
@@ -130,13 +134,12 @@ class PruningGUI(QMainWindow):
         self.detection_status.setText('Detected {} boxes'.format(len(self.detections)))
         self.detection_actions.reset()
 
-    def load_networks(self):
-        if self.image_processor is not None:
-            return
-
-        self.image_processor = ImageProcessor((424, 240), (128, 128), use_flow=True, gan_name=self.config['gan_name'],
-                                              gan_output_channels=self.config.get('gan_output_channels', 3))
-        self.rl_system = PPO.load(self.config['rl_model_path'])
+    def handle_move(self, is_end):
+        if not is_end:
+            print('Started moving')
+        else:
+            print('Ended moving')
+            self.actions_list.reset()
 
     def load(self):
         if self.test:
@@ -164,96 +167,26 @@ class PruningGUI(QMainWindow):
         self.move_robot_waypoint()
 
 
-    def move_robot(self, pt):
+    @staticmethod
+    def call_async(func, *args, **kwargs):
+        QTimer.singleShot(0, partial(func, *args, **kwargs))
 
-        # See move_server.py for defined behaviors based on array size
-        # 6-vector, will be interpreted as a joint state
-        # 3-vector, point relative to the last-defined base pose
-        # 4-vector, point relative to base pose, but with z-offset
-
-        if not self.test or (self.test and self.config['use_dummy_socket']):
-            msg = pt.tobytes()
-            ADDRESS = self.config.get('socket_ip', 'localhost')
-            PORT = self.config['move_server_port']
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            address = (ADDRESS, PORT)
-
-            sock.connect(address)
-            sock.sendall(msg)
-            response = sock.recv(1024)
-            sock.close()
-            print('Move server response: {}'.format(response))
-        print('Moved robot to: {}'.format(', '.join(['{:.3f}'.format(x) for x in pt])))
 
     def move_robot_waypoint(self):
-
         if not len(self.waypoint_list):
             return
 
         waypoint_index = self.waypoint_menu.currentData()
+        target = self.waypoint_list[waypoint_index]
 
-        self.move_robot(self.waypoint_list[waypoint_index])
+        self.call_async(self.camera_and_network_handler.move_robot, target)
+        self.reset_detections(clear=True)
+        self.image_window.clear()
 
-        success = np.random.uniform() > 0.1
-        if success:
-            self.status.setText('At Waypoint {}'.format(waypoint_index + 1))
-            self.actions_list.reset()
-        else:
-            self.status.setText('Failed to move to Waypoint {}'.format(waypoint_index + 1))
-            waypoint_index = None
-            self.actions_list.disable_all()
-
-        self.current_waypoint = waypoint_index
-
-        if waypoint_index is None:
-            self.next_button.setDisabled(True)
-        elif waypoint_index == len(self.waypoint_list) - 1:
-            self.next_button.setDisabled(True)
-        else:
-            self.next_button.setEnabled(True)
-
-    def acquire_images(self):
-
-        if self.config.get('test_camera'):
-            path = self.config['dummy_image_path']
-            file_format = self.config['dummy_image_format']
-            start_frame = np.random.randint(5, 20)
-
-            self.rgb_alt = np.array(Image.open(os.path.join(path, file_format.format(frame=start_frame)))).astype(np.uint8)[:,:,:3]
-            self.rgb_main = np.array(Image.open(os.path.join(path, file_format.format(frame=start_frame+3)))).astype(np.uint8)[:,:,:3]
-
-        else:
-
-            self.rgb_main, self.depth_img = self.cam.acquire_image()
-            self.pc = self.cam.acquire_pc(return_rgb=False)
-
-            self.move_robot(np.array([0.01, 0.0, 0]))
-            # self.move_robot(np.array([0.0, 0.01, 0]))
-
-            self.rgb_alt = self.cam.acquire_image()[0]
-            self.move_robot(self.waypoint_list[self.current_waypoint])
-
-            # For displaying depth image
-            depth_display = (self.depth_img / self.depth_img.max() * 255).astype(np.uint8)
-            self.image_window.update_image('Depth', np.dstack([depth_display] * 3), 256)
-
-        self.image_window.update_image('Main RGB', self.rgb_alt, 256)
-        self.image_window.update_image('Alt RGB', self.rgb_main, 256)
 
     def compute_flow(self):
 
-        self.load_networks()
-        self.image_processor.reset()
-        self.image_processor.process(self.rgb_alt)
-
-        self.mask_img = self.image_processor.process(self.rgb_main)
-        self.flow_img = self.image_processor.last_flow
-
-        if self.cutter_gt is not None:
-            self.mask_img[:,:,-1] = cv2.resize(self.cutter_gt, (self.mask_img.shape[1], self.mask_img.shape[0]))
-
-        self.image_window.update_image('Flow', self.flow_img, 256)
-        self.image_window.update_image('Mask', self.mask_img, 256)
+        self.call_async(self.camera_and_network_handler.compute_flow)
 
 
     def mask_click_callback(self, event):
@@ -264,6 +197,9 @@ class PruningGUI(QMainWindow):
         if self.last_click is None:
             self.last_click = coord
         else:
+
+
+
             x1, y1 = coord
             x2, y2 = self.last_click
 
@@ -274,7 +210,8 @@ class PruningGUI(QMainWindow):
             if y1 > y2:
                 y1, y2 = y2, y1
 
-            mask_upscaled = cv2.resize(self.mask_img, (self.rgb_main.shape[1], self.rgb_main.shape[0]))
+            h, w = self.camera_and_network_handler.rgb_main.shape[:2]
+            mask_upscaled = cv2.resize(self.camera_and_network_handler.mask_img, (w,h))
             branch_binary = mask_upscaled[:, :, 0] > 128
 
             valid_pix = branch_binary[y1:y2,x1:x2]
@@ -284,8 +221,25 @@ class PruningGUI(QMainWindow):
 
                 yvals, xvals = np.where(valid_pix)
                 pix = np.array([xvals, yvals]).T + [x1, y1]
-                if self.pc is not None:
-                    target = self.pc[pix[:,1], pix[:,0]].mean(axis=0)
+                pc = self.camera_and_network_handler.pc
+                if pc is not None:
+
+                    #DEBUGGING
+                    fig = plt.figure()
+                    ax = plt.axes(projection='3d')
+
+                    sel_pts = pc[pix[:,1], pix[:,0]]
+                    sel_pts = sel_pts[(sel_pts[:,2] < 1.0) & (sel_pts[:,2] > 0.05)]
+                    #
+                    # temp_pc = self.pc.reshape(-1,3)
+                    # temp_pc = temp_pc[temp_pc[:,2] < 2.0]
+
+                    #
+                    # ax.scatter3D(sel_pts[:,0], sel_pts[:,1], sel_pts[:,2])
+                    # # ax.scatter3D(temp_pc[:,0], temp_pc[:,1], temp_pc[:,2])
+                    # plt.show()
+
+                    target = sel_pts.mean(axis=0)
 
                 else:
                     print('No PC detected, filling with dummy detections')
@@ -307,14 +261,14 @@ class PruningGUI(QMainWindow):
         if np.linalg.norm(np.array(last_click) - coord) < 4:
             # Close the shape
             pts = np.array(self.cutter_mask_clicks)
-            mask = np.zeros(self.rgb_main.shape[:2], dtype=np.uint8)
+            mask = np.zeros(self.camera_and_network_handler.rgb_main.shape[:2], dtype=np.uint8)
             mask = cv2.fillPoly(mask, pts.reshape((1,-1,2)), (255,255,255))
 
             Image.fromarray(mask).save('last_cutter_mask.png')
-            self.cutter_gt = mask
             print('New cutter mask defined!')
 
             self.cutter_mask_clicks = []
+            self.camera_and_network_handler.load_cutter_gt()
         else:
             self.cutter_mask_clicks.append(coord)
             print('Click at {} recorded!'.format(coord))
@@ -328,7 +282,7 @@ class PruningGUI(QMainWindow):
         pixmap_x = pixmap_rect.width()
         pixmap_y = pixmap_rect.height()
 
-        im_y, im_x = self.rgb_main.shape[:2]
+        im_y, im_x = self.camera_and_network_handler.rgb_main.shape[:2]
 
         return int(click_x * im_x / pixmap_x), int(click_y * im_y / pixmap_y)
 
@@ -342,69 +296,13 @@ class PruningGUI(QMainWindow):
         idx = self.detection_combobox.currentIndex()
         to_send = np.zeros(4)
         to_send[:3] = self.detections[idx][0]
-        to_send[3] = -0.20
+        to_send[3] = -0.30
 
         print('Sending move to box command {}'.format(to_send))
-        self.move_robot(to_send)
+        self.camera_and_network_handler.move_robot(to_send)
 
     def execute_approach(self):
-
-        sock = None
-        if not self.test or (self.test and self.config['use_dummy_socket']):
-            ADDRESS = self.config.get('socket_ip', 'localhost')
-            PORT = self.config['vel_server_port']
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            address = (ADDRESS, PORT)
-            sock.connect(address)
-
-        self.image_processor.reset()
-        try:
-            if self.test:
-                path = self.config['dummy_image_path']
-                file_format = os.path.join(path, self.config['dummy_image_format'])
-                start_frame = np.random.randint(0, 40)
-
-                for i in range(np.random.randint(10, 30)):
-                    file_path = file_format.format(frame=start_frame + i)
-                    img = np.array(Image.open(file_path), dtype=np.uint8)
-                    seg = self.image_processor.process(img)
-
-                    self.image_window.update_image('Main RGB', img)
-                    self.image_window.update_image('Flow', self.image_processor.last_flow)
-                    self.image_window.update_image('Mask', seg)
-
-                    action = self.rl_system.predict(seg)[0]
-                    if sock is not None:
-                        sock.sendall(action.tobytes())
-                        np.frombuffer(sock.recv(1024), dtype=np.uint8) # Synchronization
-                    else:
-                        print(action)
-
-            else:
-                while time.time() - start < duration:
-
-                    raise NotImplementedError()
-                    # Get image from camera
-                    img = None
-                    seg = self.image_processor.process(img)
-
-                    self.image_window.update_image('Main RGB', img)
-                    self.image_window.update_image('Flow', self.image_processor.last_flow)
-                    self.image_window.update_image('Mask', seg)
-
-                    action = self.rl_system.predict(seg)[0]
-                    sock.sendall(action.tobytes())
-                    response = np.frombuffer(sock.recv(1024), dtype=np.uint8)  # Synchronization
-                    if response == 0:
-                        break
-
-        except Exception as e:
-            print('Ran into an Exception!')
-            print(e)
-        finally:
-            if sock is not None:
-                sock.close()
-        print('Approach finished!')
+        self.call_async(self.camera_and_network_handler.execute_approach)
 
 
     def cut(self):
@@ -412,7 +310,7 @@ class PruningGUI(QMainWindow):
             print('Cut!')
         else:
             print('No cutting will be done, will instead do retraction')
-            self.move_robot(np.array([0]))
+            self.move_robot(np.array([0], dtype=np.float64))
 
 
 
@@ -456,7 +354,7 @@ class PruningGUI(QMainWindow):
         waypoint_layout.addLayout(combobox_layout)
 
         self.actions_list = SequentialButtonList(['Acquire Images', 'Compute Flow', 'Detect Prune Points'],
-                                                 [self.acquire_images, self.compute_flow, self.detect_prune_points],
+                                                 [self.camera_and_network_handler.acquire_image, self.compute_flow, self.detect_prune_points],
                                                  name='Actions')
         self.actions_list.disable_all()
         waypoint_layout.addWidget(self.actions_list)
@@ -487,25 +385,201 @@ class PruningGUI(QMainWindow):
         self.reset_detections()
 
         return layout
-#
-# class ActionItemBar(QWidget):
-#
-#     def __init__(self, name, callback):
-#         super().__init__()
-#         layout = QHBoxLayout()
-#         self.setLayout(layout)
-#         layout.addWidget(QLabel(name))
-#
 
-class Worker(QObject):
-    finished = pyqtSignal()
-    progress = pyqtSignal(int)
 
-    def run(self):
-        for i in range(5):
-            self.progress.emit(i+1)
-        self.finished.emit()
+class CameraAndNetworkHandler(QObject):
 
+    new_image_signal = pyqtSignal(str, np.ndarray)
+    moving_start_signal = pyqtSignal()
+    moving_end_signal = pyqtSignal()
+    status_signal = pyqtSignal(str)
+
+    def __init__(self, config):
+
+        self.config = config
+        self.test = config['test']
+
+        super().__init__()
+
+        self.cam = None
+        if not self.config.get('test_camera', True):
+            self.cam = Camera(640, 480)
+
+        # Loaded images
+        self.rgb_main = None
+        self.rgb_alt = None
+        self.depth_img = None
+        self.pc = None
+        self.flow_img = None
+        self.mask_img = None
+        self.mask_detections = None
+        self.cutter_gt = None
+
+        # Loaded utilites
+        self.image_processor = None
+        self.identifier = None
+        self.rl_system = None
+
+        self.load_cutter_gt()
+
+    def load_cutter_gt(self):
+        if os.path.exists('last_cutter_mask.png'):
+            self.cutter_gt = np.array(Image.open('last_cutter_mask.png'))
+            if len(self.cutter_gt.shape) > 2:
+                self.cutter_gt = self.cutter_gt.mean(axis=2).astype(np.uint8)
+
+    def acquire_image(self):
+        if self.cam is None:
+            path = self.config['dummy_image_path']
+            file_format = self.config['dummy_image_format']
+            start_frame = np.random.randint(5, 20)
+
+            self.rgb_alt = np.array(Image.open(os.path.join(path, file_format.format(frame=start_frame)))).astype(
+                np.uint8)[:, :, :3]
+            self.rgb_main = np.array(Image.open(os.path.join(path, file_format.format(frame=start_frame + 3)))).astype(
+                np.uint8)[:, :, :3]
+        else:
+            self.rgb_main, self.depth_img = self.cam.acquire_image()
+            self.pc = self.cam.acquire_pc(return_rgb=False)
+
+            self.move_robot(np.array([0.01, 0.0, 0]))
+            # self.move_robot(np.array([0.0, 0.01, 0]))
+
+            self.rgb_alt = self.cam.acquire_image()[0]
+            self.move_robot([0])
+            depth_display = (self.depth_img / self.depth_img.max() * 255).astype(np.uint8)
+            self.new_image_signal.emit('Depth', depth_display)
+
+        self.new_image_signal.emit('Main RGB', self.rgb_main)
+        self.new_image_signal.emit('Alt RGB', self.rgb_alt)
+
+
+    def move_robot(self, pt):
+
+        self.moving_start_signal.emit()
+
+        # See move_server.py for defined behaviors based on array size
+        # 6-vector, will be interpreted as a joint state
+        # 3-vector, point relative to the last-defined base pose
+        # 4-vector, point relative to base pose, but with z-offset
+
+        if not self.test or (self.test and self.config['use_dummy_socket']):
+            msg = pt.tobytes()
+            ADDRESS = self.config.get('socket_ip', 'localhost')
+            PORT = self.config['move_server_port']
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            address = (ADDRESS, PORT)
+
+            sock.connect(address)
+            sock.sendall(msg)
+            response = sock.recv(1024)
+            sock.close()
+            print('Move server response: {}'.format(response))
+        print('Moved robot to: {}'.format(', '.join(['{:.3f}'.format(x) for x in pt])))
+
+        self.moving_end_signal.emit()
+
+    def load_networks(self):
+        if self.image_processor is not None:
+            return
+        self.status_signal.emit('Loading networks...')
+
+        self.image_processor = ImageProcessor((424, 240), (128, 128), use_flow=True, gan_name=self.config['gan_name'],
+                                              gan_output_channels=self.config.get('gan_output_channels', 3))
+        self.rl_system = PPO.load(self.config['rl_model_path'])
+        self.status_signal.emit('Done loading networks!')
+
+    def compute_flow(self):
+        self.load_networks()
+        self.image_processor.reset()
+        self.image_processor.process(self.rgb_alt)
+
+        self.mask_img = self.image_processor.process(self.rgb_main)
+        self.flow_img = self.image_processor.last_flow
+
+        if self.cutter_gt is not None:
+            self.mask_img[:,:,-1] = cv2.resize(self.cutter_gt, (self.mask_img.shape[1], self.mask_img.shape[0]))
+
+        self.new_image_signal.emit('Flow', self.flow_img)
+        self.new_image_signal.emit('Mask', self.mask_img)
+
+    def execute_approach(self):
+
+        self.moving_start_signal.emit()
+
+        sock = None
+        if not self.test or (self.test and self.config['use_dummy_socket']):
+            ADDRESS = self.config.get('socket_ip', 'localhost')
+            PORT = self.config['vel_server_port']
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            address = (ADDRESS, PORT)
+            sock.connect(address)
+
+        self.image_processor.reset()
+        try:
+            if self.cam is None:
+                path = self.config['dummy_image_path']
+                file_format = os.path.join(path, self.config['dummy_image_format'])
+                start_frame = np.random.randint(0, 40)
+
+                for i in range(np.random.randint(10, 30)):
+                    file_path = file_format.format(frame=start_frame + i)
+                    img = np.array(Image.open(file_path), dtype=np.uint8)
+                    seg = self.image_processor.process(img)
+
+                    self.new_image_signal.emit('Main RGB', img)
+                    self.new_image_signal.emit('Flow', self.image_processor.last_flow)
+                    self.new_image_signal.emit('Mask', seg)
+
+                    action = self.rl_system.predict(seg)[0]
+                    if sock is not None:
+                        sock.sendall(action.tobytes())
+                        np.frombuffer(sock.recv(1024), dtype=np.uint8) # Synchronization
+                    else:
+                        print(action)
+
+            else:
+                start = time.time()
+                action_freq = 2
+                duration = self.config.get('approach_duration', 10.0)
+
+                last_time = 0.0
+
+                while time.time() - start < duration:
+
+                    elapsed = time.time() - last_time
+                    if elapsed < 1 / action_freq:
+                        time.sleep(1 / action_freq - elapsed)
+
+                    # Get image from camera
+                    img, _ = self.cam.acquire_image()
+                    seg = self.image_processor.process(img)
+                    if self.cutter_gt is not None:
+                        seg[:,:,-1] = cv2.resize(self.cutter_gt, (seg.shape[1], seg.shape[0]))
+
+                    self.new_image_signal.emit('Main RGB', img)
+                    self.new_image_signal.emit('Flow', self.image_processor.last_flow)
+                    self.new_image_signal.emit('Mask', seg)
+
+                    action = self.rl_system.predict(seg)[0]
+                    speed = self.config.get('cutter_speed', 0.03)
+                    final_action = np.array([action[0] * speed, action[1] * speed, speed], dtype=np.float64)
+                    print(final_action)
+
+                    if sock is not None:
+                        sock.sendall(final_action.tobytes())
+                        response = np.frombuffer(sock.recv(1024), dtype=np.uint8)  # Synchronization
+                        if response == 0:
+                            break
+
+        except Exception as e:
+            print('Ran into an Exception!')
+            print(e)
+        finally:
+            if sock is not None:
+                sock.close()
+        self.moving_end_signal.emit()
+        print('Approach finished!')
 
 
 class ImageDisplay(QWidget):
@@ -545,6 +619,7 @@ class ImageDisplay(QWidget):
             img_layout.addWidget(col)
 
     def update_image(self, label, img_array, width=None):
+
         if width is None:
             width = img_array.shape[1]
 
@@ -557,9 +632,13 @@ class ImageDisplay(QWidget):
         pixmap = QPixmap(qimg).scaledToWidth(width)
         self.labels[label].setPixmap(pixmap)
 
-    def clear(self):
-        for label in self.labels.keys():
-            label.setPixmap(QPixmap())
+    def clear(self, key=None):
+        if key:
+            keys = [key]
+        else:
+            keys = self.labels.keys()
+        for label in keys:
+            self.update_image(label, np.zeros((1,1,3), dtype=np.uint8))
 
     def click_callback(self, label, event):
         self.callbacks.get(label, lambda x: None)(event)
@@ -621,12 +700,17 @@ class SequentialButtonList(QVGroupBox):
             button.setDisabled(True)
 
 
+def async_wrapper(func):
+    def new_func(*args, **kwargs):
+        QTimer.singleShot(0, partial(func, *args, **kwargs))
+    return new_func
+
 if __name__ == '__main__':
 
     config = {
         # 'test': False,
         'test': True,
-        'test_camera': True,
+        'test_camera': False,
         # 'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\GanTrainingPairsWithCutters\train',
         # 'dummy_image_format': 'render_{}_randomized_{:05d}.png',
         # 'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\RealData\MartinDataCollection\20220109-141856-Downsized',
@@ -645,7 +729,7 @@ if __name__ == '__main__':
     }
 
     if not config['test']:
-        config['socket_ip'] = '169.254.116.60'
+        config['socket_ip'] = '169.254.174.52'
 
     procs = []
     if config['test'] and config['use_dummy_socket']:
