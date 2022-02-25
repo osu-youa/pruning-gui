@@ -179,7 +179,7 @@ class PruningGUI(QMainWindow):
         waypoint_index = self.waypoint_menu.currentData()
         target = self.waypoint_list[waypoint_index]
 
-        self.call_async(self.camera_and_network_handler.move_robot, target)
+        self.call_async(self.camera_and_network_handler.move_robot, 1, target)
         self.reset_detections(clear=True)
         self.image_window.clear()
 
@@ -299,7 +299,7 @@ class PruningGUI(QMainWindow):
         to_send[3] = -0.30
 
         print('Sending move to box command {}'.format(to_send))
-        self.camera_and_network_handler.move_robot(to_send)
+        self.call_async(self.camera_and_network_handler.move_robot, 4, to_send)
 
     def execute_approach(self):
         self.call_async(self.camera_and_network_handler.execute_approach)
@@ -310,10 +310,7 @@ class PruningGUI(QMainWindow):
             print('Cut!')
         else:
             print('No cutting will be done, will instead do retraction')
-            self.move_robot(np.array([0], dtype=np.float64))
-
-
-
+            self.call_async(self.camera_and_network_handler.move_robot, 0)
 
 
     def init_left_layout(self):
@@ -442,11 +439,10 @@ class CameraAndNetworkHandler(QObject):
             self.rgb_main, self.depth_img = self.cam.acquire_image()
             self.pc = self.cam.acquire_pc(return_rgb=False)
 
-            self.move_robot(np.array([0.01, 0.0, 0]))
-            # self.move_robot(np.array([0.0, 0.01, 0]))
+            self.move_robot(3, np.array([0.01, 0.0, 0]))
 
             self.rgb_alt = self.cam.acquire_image()[0]
-            self.move_robot([0])
+            self.move_robot(0)
             depth_display = (self.depth_img / self.depth_img.max() * 255).astype(np.uint8)
             self.new_image_signal.emit('Depth', depth_display)
 
@@ -454,14 +450,17 @@ class CameraAndNetworkHandler(QObject):
         self.new_image_signal.emit('Alt RGB', self.rgb_alt)
 
 
-    def move_robot(self, pt):
+    def move_robot(self, code, pt=None):
+
+        # See move_server.py for defined codes
 
         self.moving_start_signal.emit()
+        to_send = code
+        if pt is not None:
+            to_send.extend(pt)
+        to_send = np.array(to_send, dtype=np.float64)
 
-        # See move_server.py for defined behaviors based on array size
-        # 6-vector, will be interpreted as a joint state
-        # 3-vector, point relative to the last-defined base pose
-        # 4-vector, point relative to base pose, but with z-offset
+
 
         if not self.test or (self.test and self.config['use_dummy_socket']):
             msg = pt.tobytes()

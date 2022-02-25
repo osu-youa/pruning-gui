@@ -14,15 +14,27 @@ from copy import deepcopy
 BASE_TF = None
 BASE_JOINTS = None
 
-def process(received_array):
 
+def process(received_array):
     tool_frame = rospy.get_param('tool_frame')
     base_frame = rospy.get_param('base_frame')
 
     success = 0
 
-    if len(received_array) == 6:
+    # All commanded arrays should be of the form [code, v1, v2, ...]
+    # The code contains info on how to interpret the received array
+    code = int(received_array[0])
+    received_array = received_array[1:]
+
+    if code == 0:  # RETRACT TO BASE POSE
+        if BASE_JOINTS is not None:
+            success = plan_joints_srv(BASE_JOINTS, True)
+        else:
+            print('Cannot retract to base joints when none has been defined!')
+
+    elif code == 1:     # PLAN TO JOINTS, RESET BASE
         print('Received joint command')
+
         js = JointState()
         js.position = received_array
         rez = plan_joints_srv(js, True)
@@ -35,7 +47,16 @@ def process(received_array):
         BASE_TF = tf
         BASE_JOINTS = rospy.wait_for_message('/joint_states', JointState, timeout=0.5)
 
-    elif len(received_array) == 3:
+    elif code == 2:
+        print('Received pose command')
+        pose = PoseStamped()
+        pose.header.frame_id = rospy.get_param('base_frame')
+        pose.pose.position = Point(*received_array[:3])
+        pose.pose.orientation = Quaternion(*received_array[3:])
+        rez = plan_pose_srv(pose, True)
+        success = int(rez.success)
+
+    elif code == 3:     # PLAN TO TOOL-FRAME POSE
 
         print('Received tool-frame point command')
 
@@ -49,12 +70,9 @@ def process(received_array):
         success = int(rez.success)
 
 
-    elif len(received_array) == 4:
+    elif code == 4:
 
         print('Received tool-frame point command with z-offset')
-
-        # A tool-frame point command like in the case of len == 3, but also includes a desired z-offset
-        # The final point determined will be determined by the z-offset
 
         pt_array = received_array[:3]
         z_offset = received_array[3]
@@ -63,9 +81,9 @@ def process(received_array):
         pose = tf_to_pose(tf, keep_header=True)
 
         # First modify the tf to move it by the z-offset
-
         pt_world = apply_tf_to_point_array(tf, np.array([0, 0, z_offset]), tool_frame).point
-        tf.translation.x, tf.translation.y, tf.translation.z = pt_world.x, pt_world.y, pt_world.z
+        tl = tf.transform.translation
+        tl.x, tl.y, tl.z = pt_world.x, pt_world.y, pt_world.z
 
         # Using the transformed TF, process the received point
         pt_approach = apply_tf_to_point_array(tf, pt_array, tool_frame).point
@@ -74,31 +92,9 @@ def process(received_array):
         rez = plan_pose_srv(pose, True)
         success = int(rez.success)
 
-    elif len(received_array) == 7:
-        print('Received pose command')
-        pose = PoseStamped()
-        pose.header.frame_id = rospy.get_param('base_frame')
-        pose.pose.position = Point(*received_array[:3])
-        pose.pose.orientation = Quaternion(*received_array[3:])
-        rez = plan_pose_srv(pose, True)
-        success = int(rez.success)
-
-    elif len(received_array) == 1:
-        code = received_array[0]
-        if code == 0:
-            # Retract to home pose
-            if BASE_JOINTS is not None:
-                success = plan_joints_srv(BASE_JOINTS, True)
-            else:
-                print('Cannot retract to base joints when none has been defined!')
-
-
-        else:
-            print('Unknown single code {}'.format(code))
-
 
     else:
-        print('Received unknown array of len {}, not taking any action'.format(len(received_array)))
+        print('Received unknown code {}, not taking any action'.format(code))
 
     return success
 
@@ -111,8 +107,7 @@ def apply_tf_to_point_array(tf, array, array_frame):
     return tfed_pt
 
 
-def retrieve_tf(base_frame, target_frame, stamp = rospy.Time()):
-
+def retrieve_tf(base_frame, target_frame, stamp=rospy.Time()):
     # Retrieves a TransformStamped with a child frame of base_frame and a target frame of target_frame
     # This transform can be applied to a point in the base frame to transform it to the target frame
     success = tf_buffer.can_transform(target_frame, base_frame, stamp, rospy.Duration(0.5))
@@ -120,6 +115,7 @@ def retrieve_tf(base_frame, target_frame, stamp = rospy.Time()):
         rospy.logerr("Couldn't look up transform between {} and {}!".format(target_frame, base_frame))
     tf = tf_buffer.lookup_transform(target_frame, base_frame, stamp)
     return tf
+
 
 def tf_to_pose(tf, keep_header=False):
     header = None
@@ -141,10 +137,10 @@ def tf_to_pose(tf, keep_header=False):
     pose_stamped.header = header
     return pose_stamped
 
+
 if __name__ == '__main__':
 
     rospy.init_node('move_server')
-
 
     tf_buffer = Buffer()
     tf_listener = TransformListener2(tf_buffer)
@@ -153,7 +149,7 @@ if __name__ == '__main__':
     plan_joints_srv = rospy.ServiceProxy('plan_joints', HandleJointPlan)
     plan_pose_srv = rospy.ServiceProxy('plan_pose', HandlePosePlan)
 
-    ADDRESS = 'localhost'
+    ADDRESS = '169.254.174.52'
     PORT = 10000
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
