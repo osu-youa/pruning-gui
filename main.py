@@ -1,7 +1,8 @@
-from PyQt5.QtWidgets import QMainWindow, QCheckBox, QGroupBox, QGridLayout, QVBoxLayout, QHBoxLayout, QPushButton
+from PyQt5.QtWidgets import QMainWindow, QCheckBox, QGroupBox, QGridLayout, QVBoxLayout, QHBoxLayout, QPushButton, QSizePolicy
 from PyQt5.QtWidgets import QApplication, QHBoxLayout, QWidget, QLabel, QLineEdit, QColorDialog, QComboBox
 from PyQt5.QtCore import QRect, QTimer, QObject, QThread, pyqtSignal
 from PyQt5.QtGui import QPainter, QPixmap, QImage
+
 import numpy as np
 import os
 from functools import partial
@@ -36,10 +37,17 @@ class PruningGUI(QMainWindow):
         self.thread.start()
         self.camera_and_network_handler = CameraAndNetworkHandler(config)
         self.camera_and_network_handler.moveToThread(self.thread)
+
+        self.socket_thread = QThread(self)
+        self.socket_thread.start()
+        self.socket_handler = SocketHandler(self.config.get('socket_ip', 'localhost'), 10002, dummy=self.test)
+        self.socket_handler.moveToThread(self.socket_thread)
+
         # Connect signals
 
         self.camera_and_network_handler.moving_start_signal.connect(partial(self.handle_move, 0))
         self.camera_and_network_handler.moving_end_signal.connect(partial(self.handle_move, 1))
+        self.socket_handler.return_signal.connect(lambda x: self.action_panel_status.setText(x))
 
         # GUI setup
         self.image_window = ImageDisplay([['Main RGB', 'Alt RGB'], ['Depth', 'Flow'], ['Mask', 'Boxes']],
@@ -54,18 +62,17 @@ class PruningGUI(QMainWindow):
         left_side_layout = self.init_left_layout()
         middle_layout = self.init_middle_layout()
         right_side_layout = self.init_right_layout()
+        action_panel_layout = self.init_action_panel()
         widget = QWidget()
         self.setCentralWidget(widget)
+        vertical_layout = QVBoxLayout()
         top_level_layout = QHBoxLayout()
-        widget.setLayout(top_level_layout)
+        widget.setLayout(vertical_layout)
+        vertical_layout.addLayout(top_level_layout)
         top_level_layout.addLayout(left_side_layout)
         top_level_layout.addLayout(middle_layout)
         top_level_layout.addLayout(right_side_layout)
-
-        # # TESTING THREADS
-        # btn = QPushButton('Test thread')
-        # top_level_layout.addWidget(btn)
-        # btn.clicked.connect(self.do_thread_test)
+        vertical_layout.addLayout(action_panel_layout)
 
 
 
@@ -383,6 +390,63 @@ class PruningGUI(QMainWindow):
 
         return layout
 
+    def init_action_panel(self):
+
+        self.action_panel_status = QLabel('')
+        main_layout = QVBoxLayout()
+        button_layout = QHBoxLayout()
+
+        abort_button = QPushButton('Abort')
+        abort_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        abort_button.resize(250, 100)
+        abort_button.setStyleSheet("background-color: red; color: white")
+        abort_button.clicked.connect(partial(self.socket_handler.send_array, np.array([0])))
+
+        buttons = [abort_button]
+        for button in buttons:
+            button_layout.addWidget(button)
+
+        main_layout.addLayout(button_layout)
+        main_layout.addWidget(self.action_panel_status)
+
+        return main_layout
+
+
+class SocketHandler(QObject):
+
+    return_signal = pyqtSignal(str)
+
+    def __init__(self, address, socket=None, dummy=False):
+
+        super().__init__()
+
+        self.address = address
+        self.socket = socket
+        self.dummy = dummy
+
+    def send_array(self, array):
+
+
+
+        msg = array.astype(np.float64).tobytes()
+
+        if not self.dummy:
+
+            ADDRESS = self.config.get('socket_ip', 'localhost')
+            PORT = self.config['move_server_port']
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            address = (ADDRESS, PORT)
+
+            sock.connect(address)
+            sock.sendall(msg)
+            response = sock.recv(1024)
+            sock.close()
+
+        else:
+            response = 'Sent dummy array command {}'.format(array)
+
+        self.return_signal.emit(response)
+
 
 class CameraAndNetworkHandler(QObject):
 
@@ -455,15 +519,13 @@ class CameraAndNetworkHandler(QObject):
         # See move_server.py for defined codes
 
         self.moving_start_signal.emit()
-        to_send = code
+        to_send = [code]
         if pt is not None:
             to_send.extend(pt)
         to_send = np.array(to_send, dtype=np.float64)
 
-
-
         if not self.test or (self.test and self.config['use_dummy_socket']):
-            msg = pt.tobytes()
+            msg = to_send.tobytes()
             ADDRESS = self.config.get('socket_ip', 'localhost')
             PORT = self.config['move_server_port']
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -474,7 +536,7 @@ class CameraAndNetworkHandler(QObject):
             response = sock.recv(1024)
             sock.close()
             print('Move server response: {}'.format(response))
-        print('Moved robot to: {}'.format(', '.join(['{:.3f}'.format(x) for x in pt])))
+        print('Sent robot command: {}'.format(', '.join(['{:.3f}'.format(x) for x in to_send])))
 
         self.moving_end_signal.emit()
 
