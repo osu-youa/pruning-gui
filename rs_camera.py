@@ -9,6 +9,7 @@ class Camera:
         self.height = height
         self.use_depth = use_depth
         self.fps = fps
+        self.last_intrinsics = None
 
         self.pc = rs.pointcloud()
         self.pipe = rs.pipeline()
@@ -42,6 +43,8 @@ class Camera:
         points = self.pc.calculate(depth_frame)
         pt_array = np.asanyarray(points.get_vertices()).view(np.float32).reshape(self.height, self.width, 3)
 
+        self.last_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
+
         if not return_rgb:
             return pt_array
 
@@ -50,6 +53,12 @@ class Camera:
 
     def shutdown(self):
         self.pipe.stop()
+
+    def deproject_pixel(self, pix, depth_scale=1.0):
+        if self.last_intrinsics is None:
+            raise Exception("No PC has been calculated so intrinsics have not been computed. Please compute a PC first")
+        return np.array(rs.rs2_deproject_pixel_to_point(self.last_intrinsics, pix, depth_scale))
+
 
 
 if __name__ == '__main__':

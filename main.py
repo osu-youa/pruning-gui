@@ -16,6 +16,7 @@ import cv2
 
 import matplotlib.pyplot as plt
 from mpl_toolkits import mplot3d
+from utils import line_plane_intersection
 
 
 class PruningGUI(QMainWindow):
@@ -228,25 +229,16 @@ class PruningGUI(QMainWindow):
 
                 yvals, xvals = np.where(valid_pix)
                 pix = np.array([xvals, yvals]).T + [x1, y1]
+
+                avg_pix = pix.mean(axis=0)
+
+
                 pc = self.camera_and_network_handler.pc
                 if pc is not None:
 
-                    #DEBUGGING
-                    fig = plt.figure()
-                    ax = plt.axes(projection='3d')
-
-                    sel_pts = pc[pix[:,1], pix[:,0]]
-                    sel_pts = sel_pts[(sel_pts[:,2] < 1.0) & (sel_pts[:,2] > 0.05)]
-                    #
-                    # temp_pc = self.pc.reshape(-1,3)
-                    # temp_pc = temp_pc[temp_pc[:,2] < 2.0]
-
-                    #
-                    # ax.scatter3D(sel_pts[:,0], sel_pts[:,1], sel_pts[:,2])
-                    # # ax.scatter3D(temp_pc[:,0], temp_pc[:,1], temp_pc[:,2])
-                    # plt.show()
-
-                    target = sel_pts.mean(axis=0)
+                    plane_c, plane_normal = self.camera_and_network_handler.plane
+                    ray = np.array(self.camera_and_network_handler.cam.deproject_pixel(avg_pix, 1.0))
+                    target = line_plane_intersection(plane_normal, plane_c, ray)
 
                 else:
                     print('No PC detected, filling with dummy detections')
@@ -518,8 +510,8 @@ class CameraAndNetworkHandler(QObject):
 
     def process_pc(self):
         # Used to determine the plane corresponding to the PC
-        FAR_DIST = 2.0
-        NEAR_DIST = 0.0
+        FAR_DIST = 1.0
+        NEAR_DIST = 0.05
         QUANT = 0.25
         PERC_CUTOFF = 0.01
 
@@ -825,7 +817,7 @@ if __name__ == '__main__':
         'move_server_port': 10000,
         'vel_server_port': 10001,
         'rl_model_path': r'C:\Users\davijose\PycharmProjects\pybullet-test\best_model_1_0.zip',
-        'approach_duration': 20.0,
+        'approach_duration': 10.0,
 
     }
 
