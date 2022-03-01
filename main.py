@@ -471,6 +471,7 @@ class CameraAndNetworkHandler(QObject):
         self.rgb_alt = None
         self.depth_img = None
         self.pc = None
+        self.plane = None
         self.flow_img = None
         self.mask_img = None
         self.mask_detections = None
@@ -502,6 +503,7 @@ class CameraAndNetworkHandler(QObject):
         else:
             self.rgb_main, self.depth_img = self.cam.acquire_image()
             self.pc = self.cam.acquire_pc(return_rgb=False)
+            self.process_pc()
 
             self.move_robot(3, np.array([0.01, 0.0, 0]))
 
@@ -512,6 +514,43 @@ class CameraAndNetworkHandler(QObject):
 
         self.new_image_signal.emit('Main RGB', self.rgb_main)
         self.new_image_signal.emit('Alt RGB', self.rgb_alt)
+
+
+    def process_pc(self):
+        # Used to determine the plane corresponding to the PC
+        FAR_DIST = 2.0
+        NEAR_DIST = 0.0
+        QUANT = 0.25
+        PERC_CUTOFF = 0.01
+
+        pc = self.pc.reshape(-1, 3)
+        total_points = len(pc)
+        idx = (pc[:,2] > NEAR_DIST) & (pc[:,2] < FAR_DIST)
+        pc = pc[idx]
+
+        prop = len(pc) / total_points
+        print('Proportion of foreground pts: {:.4f}'.format(prop))
+
+        if prop < PERC_CUTOFF:
+
+            print('There were not enough points to do a SVD! Using assumption of 30 cm away')
+            self.plane = (np.array([0, 0, 1], np.array([0, 0, 0.30])))
+            return
+
+        lower_z = np.quantile(pc[:,2], QUANT)
+        upper_z = np.quantile(pc[:,2], 1 - QUANT)
+
+        pc = pc[(pc[:,2] > lower_z) & (pc[:,2] < upper_z)]
+        center = pc.mean(axis=0)
+
+        pc = pc - center
+
+        if len(pc) > 1000:
+            pc = pc[np.random.choice(len(pc), 1000, replace=False)]
+
+        u, s, v = np.linalg.svd(pc, full_matrices=True)
+        least_sig = v[2]
+        self.plane = (center, least_sig)
 
 
     def move_robot(self, code, pt=None):
@@ -786,6 +825,7 @@ if __name__ == '__main__':
         'move_server_port': 10000,
         'vel_server_port': 10001,
         'rl_model_path': r'C:\Users\davijose\PycharmProjects\pybullet-test\best_model_1_0.zip',
+        'approach_duration': 20.0,
 
     }
 

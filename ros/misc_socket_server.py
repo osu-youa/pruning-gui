@@ -23,6 +23,9 @@ def process(received_array):
         abort_pub.publish(Bool(True))
         msg = 'Abort message sent'
 
+    elif code == 1:
+        msg = 'Cutting service not implemented yet!'
+
     elif code == -1:
         msg = 'Connection has successfully been established!'
 
