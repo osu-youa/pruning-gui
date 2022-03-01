@@ -13,7 +13,8 @@ from copy import deepcopy
 
 BASE_TF = None
 BASE_JOINTS = None
-
+PC_FRAME = '/camera_color_optical_frame'
+PC_TF = None
 
 def process(received_array):
     tool_frame = rospy.get_param('tool_frame')
@@ -44,8 +45,11 @@ def process(received_array):
 
         global BASE_TF
         global BASE_JOINTS
+        global PC_TF
         BASE_TF = tf
         BASE_JOINTS = rospy.wait_for_message('/joint_states', JointState, timeout=0.5)
+        PC_TF = retrieve_tf(PC_FRAME, base_frame)
+
 
     elif code == 2:
         print('Received pose command')
@@ -72,12 +76,12 @@ def process(received_array):
 
     elif code == 4:
 
-        print('Received tool-frame point command with z-offset')
+        print('Received camera-frame tool-frame point command with z-offset')
 
         pt_array = received_array[:3]
         z_offset = received_array[3]
 
-        tf = BASE_TF
+        tf = PC_TF
         pose = tf_to_pose(tf, keep_header=True)
 
         # First modify the tf to move it by the z-offset
