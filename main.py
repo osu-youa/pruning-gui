@@ -1,7 +1,8 @@
 from PyQt5.QtWidgets import QMainWindow, QCheckBox, QGroupBox, QGridLayout, QVBoxLayout, QHBoxLayout, QPushButton, QSizePolicy
 from PyQt5.QtWidgets import QApplication, QHBoxLayout, QWidget, QLabel, QLineEdit, QColorDialog, QComboBox
-from PyQt5.QtCore import QRect, QTimer, QObject, QThread, pyqtSignal
+from PyQt5.QtCore import QRect, QTimer, QObject, QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QPainter, QPixmap, QImage
+
 
 import numpy as np
 import os
@@ -48,7 +49,7 @@ class PruningGUI(QMainWindow):
 
         self.camera_and_network_handler.moving_start_signal.connect(partial(self.handle_move, 0))
         self.camera_and_network_handler.moving_end_signal.connect(partial(self.handle_move, 1))
-        self.socket_handler.return_signal.connect(lambda x: self.action_panel_status.setText(x))
+        self.socket_handler.return_signal.connect(self.set_temporary_action_panel_status)
 
         # GUI setup
         self.image_window = ImageDisplay([['Main RGB', 'Alt RGB'], ['Depth', 'Flow'], ['Mask', 'Boxes']],
@@ -147,7 +148,6 @@ class PruningGUI(QMainWindow):
             print('Started moving')
         else:
             print('Ended moving')
-            self.actions_list.reset()
 
     def load(self):
         if self.test:
@@ -285,9 +285,8 @@ class PruningGUI(QMainWindow):
 
         return int(click_x * im_x / pixmap_x), int(click_y * im_y / pixmap_y)
 
-    def detect_prune_points(self):
-        print('Automatic detection of pruning is currently not implemented')
-        print('You can click on the mask box instead to define boxes!')
+    def run_detection(self):
+        self.call_async(self.camera_and_network_handler.run_detection)
 
 
     def move_to_box(self):
@@ -304,13 +303,26 @@ class PruningGUI(QMainWindow):
         self.call_async(self.camera_and_network_handler.execute_approach)
 
 
-    def cut(self):
-        if self.test:
-            print('Cut!')
-        else:
-            print('No cutting will be done, will instead do retraction')
-            self.call_async(self.camera_and_network_handler.move_robot, 0)
+    def retract(self):
+        self.call_async(self.camera_and_network_handler.move_robot, 0)
 
+    def cut(self):
+
+        mods = QApplication.keyboardModifiers()
+        shift_clicked = mods == Qt.ShiftModifier
+
+        if shift_clicked:
+            self.send_socket_command_and_reset(np.array([1]))
+        else:
+            self.set_temporary_action_panel_status('Please hold the Shift button down when cutting!')
+
+
+    def send_socket_command_and_reset(self, cmd):
+        self.socket_handler.send_array(cmd)
+
+    def set_temporary_action_panel_status(self, text):
+        self.action_panel_status.setText(text)
+        QTimer.singleShot(3000, lambda: self.action_panel_status.setText(''))
 
     def init_left_layout(self):
         layout = QVBoxLayout()
@@ -349,11 +361,15 @@ class PruningGUI(QMainWindow):
         combobox_layout.addWidget(self.next_button)
         waypoint_layout.addLayout(combobox_layout)
 
-        self.actions_list = SequentialButtonList(['Acquire Images', 'Compute Flow', 'Detect Prune Points'],
-                                                 [self.camera_and_network_handler.acquire_image, self.compute_flow, self.detect_prune_points],
-                                                 name='Actions')
-        self.actions_list.disable_all()
-        waypoint_layout.addWidget(self.actions_list)
+        self.image_process_button = QPushButton('Run detection')
+        self.image_process_button.clicked.connect(self.run_detection)
+
+        #
+        # self.actions_list = SequentialButtonList(['Acquire Images', 'Compute Flow', 'Detect Prune Points'],
+        #                                          [self.camera_and_network_handler.acquire_image, self.compute_flow, self.detect_prune_points],
+        #                                          name='Actions')
+        # self.actions_list.disable_all()
+        waypoint_layout.addWidget(self.image_process_button)
 
         layout.addWidget(waypoint_widget)
 
@@ -370,13 +386,20 @@ class PruningGUI(QMainWindow):
         layout.addWidget(self.detection_widget)
 
         self.detection_combobox = QComboBox()
-        self.detection_actions = SequentialButtonList(['Move to Box', 'Execute Approach', 'Cut'],
-                                                 [self.move_to_box, self.execute_approach, self.cut],
+        self.detection_move_button = QPushButton('Move')
+        combo_widget = QWidget()
+        combo_layout = QHBoxLayout()
+        combo_widget.setLayout(combo_layout)
+        combo_layout.addWidget(self.detection_combobox)
+        combo_layout.addWidget(self.detection_move_button)
+
+        self.detection_actions = SequentialButtonList(['Execute Approach', 'Retract'],
+                                                 [self.execute_approach, self.retract],
                                                  name='Actions')
 
         self.detection_combobox.currentIndexChanged.connect(lambda: self.detection_actions.reset())
 
-        self.detection_widget.addWidget(self.detection_combobox)
+        self.detection_widget.addWidget(combo_widget)
         self.detection_widget.addWidget(self.detection_actions)
         self.reset_detections()
 
@@ -388,14 +411,17 @@ class PruningGUI(QMainWindow):
         main_layout = QVBoxLayout()
         button_layout = QHBoxLayout()
 
-        abort_button = QPushButton('Abort')
-        abort_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        abort_button.resize(250, 100)
-        abort_button.setStyleSheet("background-color: red; color: white")
-        abort_button.clicked.connect(partial(self.socket_handler.send_array, np.array([0])))
+        buttons = [
+            ('Abort', "background-color: red; color: white", partial(self.send_socket_command_and_reset, np.array([0]))),
+            ('Cut (Hold Shift)', "background-color: green;", self.cut)
+        ]
 
-        buttons = [abort_button]
-        for button in buttons:
+        for text, style, callback in buttons:
+            button = QPushButton(text)
+            button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+            button.resize(250, 100)
+            button.setStyleSheet(style)
+            button.clicked.connect(callback)
             button_layout.addWidget(button)
 
         main_layout.addLayout(button_layout)
@@ -417,8 +443,6 @@ class SocketHandler(QObject):
         self.dummy = dummy
 
     def send_array(self, array):
-
-
 
         msg = array.astype(np.float64).tobytes()
 
@@ -481,6 +505,12 @@ class CameraAndNetworkHandler(QObject):
             self.cutter_gt = np.array(Image.open('last_cutter_mask.png'))
             if len(self.cutter_gt.shape) > 2:
                 self.cutter_gt = self.cutter_gt.mean(axis=2).astype(np.uint8)
+
+    def run_detection(self):
+
+        self.acquire_image()
+        self.compute_flow()
+        self.find_pruning_points()
 
     def acquire_image(self):
         if self.cam is None:
@@ -570,6 +600,7 @@ class CameraAndNetworkHandler(QObject):
         print('Sent robot command: {}'.format(', '.join(['{:.3f}'.format(x) for x in to_send])))
 
         self.moving_end_signal.emit()
+        self.status_signal.emit('Done with robot move!')
 
     def load_networks(self):
         if self.image_processor is not None:
@@ -594,6 +625,11 @@ class CameraAndNetworkHandler(QObject):
 
         self.new_image_signal.emit('Flow', self.flow_img)
         self.new_image_signal.emit('Mask', self.mask_img)
+
+        self.status_signal.emit('Flows computed!')
+
+    def find_pruning_points(self):
+        self.status_signal.emit('Pruning point detection is not implemented, please select manually!')
 
     def execute_approach(self):
 
@@ -805,9 +841,9 @@ def async_wrapper(func):
 if __name__ == '__main__':
 
     config = {
-        'test': False,
+        'test': True,
         # 'test': True,
-        'test_camera': False,
+        'test_camera': True,
         # 'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\GanTrainingPairsWithCutters\train',
         # 'dummy_image_format': 'render_{}_randomized_{:05d}.png',
         # 'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\RealData\MartinDataCollection\20220109-141856-Downsized',
