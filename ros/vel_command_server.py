@@ -32,8 +32,8 @@ if __name__ == '__main__':
     servo_start = rospy.ServiceProxy('servo_activate', Empty)
     servo_stop = rospy.ServiceProxy('servo_stop', Empty)
 
-    ADDRESS = 'localhost'
-    PORT = 10000
+    ADDRESS = '169.254.116.60'
+    PORT = 10001
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     def shutdown():
@@ -52,6 +52,9 @@ if __name__ == '__main__':
         except socket.timeout:
             continue
         print('Connection accepted!')
+
+        ABORT = False
+        CONTACT = False
 
         servo_start()
         try:

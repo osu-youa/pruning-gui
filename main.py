@@ -80,7 +80,7 @@ class PruningGUI(QMainWindow):
 
         self.camera_and_network_handler.new_image_signal.connect(partial(self.image_window.update_image, width=256))
         self.camera_and_network_handler.status_signal.connect(self.update_status)
-
+        self.call_async(self.camera_and_network_handler.load_networks)
 
     def update_status(self, status):
         self.status.setText(status)
@@ -424,14 +424,14 @@ class SocketHandler(QObject):
 
         if not self.dummy:
 
-            ADDRESS = self.config.get('socket_ip', 'localhost')
-            PORT = self.config['move_server_port']
+            ADDRESS = self.address
+            PORT = self.socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             address = (ADDRESS, PORT)
 
             sock.connect(address)
             sock.sendall(msg)
-            response = sock.recv(1024)
+            response = sock.recv(1024).decode('utf-8')
             sock.close()
 
         else:
@@ -632,7 +632,7 @@ class CameraAndNetworkHandler(QObject):
 
             else:
                 start = time.time()
-                action_freq = 2
+                action_freq = 0.5
                 duration = self.config.get('approach_duration', 10.0)
 
                 last_time = 0.0
@@ -642,6 +642,8 @@ class CameraAndNetworkHandler(QObject):
                     elapsed = time.time() - last_time
                     if elapsed < 1 / action_freq:
                         time.sleep(1 / action_freq - elapsed)
+
+                    last_time = time.time()
 
                     # Get image from camera
                     img, _ = self.cam.acquire_image()
@@ -775,12 +777,14 @@ class SequentialButtonList(QVGroupBox):
             self.addWidget(button)
 
     def run_callbacks(self, i):
-        for action in range(i+1):
-            if action < self.next_to_run:
-                continue
-            self.callbacks[action]()
-            self.buttons[action].setDisabled(True)
-        self.next_to_run = i+1
+
+        self.callbacks[i]()
+        # for action in range(i+1):
+        #     if action < self.next_to_run:
+        #         continue
+        #     self.callbacks[action]()
+        #     self.buttons[action].setDisabled(True)
+        # self.next_to_run = i+1
 
     def reset(self):
         self.next_to_run = 0
@@ -788,8 +792,9 @@ class SequentialButtonList(QVGroupBox):
             button.setEnabled(True)
 
     def disable_all(self):
-        for button in self.buttons:
-            button.setDisabled(True)
+        pass
+        # for button in self.buttons:
+        #     button.setDisabled(True)
 
 
 def async_wrapper(func):
@@ -800,8 +805,8 @@ def async_wrapper(func):
 if __name__ == '__main__':
 
     config = {
-        # 'test': False,
-        'test': True,
+        'test': False,
+        # 'test': True,
         'test_camera': False,
         # 'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\GanTrainingPairsWithCutters\train',
         # 'dummy_image_format': 'render_{}_randomized_{:05d}.png',
@@ -822,7 +827,7 @@ if __name__ == '__main__':
     }
 
     if not config['test']:
-        config['socket_ip'] = '169.254.174.52'
+        config['socket_ip'] = '169.254.116.60'
 
     procs = []
     if config['test'] and config['use_dummy_socket']:

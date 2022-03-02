@@ -29,6 +29,7 @@ def process(received_array):
     elif code == -1:
         msg = 'Connection has successfully been established!'
 
+    print(msg)
     return msg
 
 
@@ -46,7 +47,7 @@ if __name__ == '__main__':
 
     abort_pub = rospy.Publisher('abort', Bool, queue_size=1)
 
-    ADDRESS = '169.254.174.52'
+    ADDRESS = '169.254.116.60'
     PORT = 10002
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

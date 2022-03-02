@@ -13,7 +13,8 @@ from copy import deepcopy
 
 BASE_TF = None
 BASE_JOINTS = None
-PC_FRAME = '/camera_color_optical_frame'
+PC_FRAME = 'camera_color_optical_frame'
+# PC_FRAME = None
 PC_TF = None
 
 def process(received_array):
@@ -48,7 +49,8 @@ def process(received_array):
         global PC_TF
         BASE_TF = tf
         BASE_JOINTS = rospy.wait_for_message('/joint_states', JointState, timeout=0.5)
-        PC_TF = retrieve_tf(PC_FRAME, base_frame)
+
+        PC_TF = retrieve_tf(PC_FRAME or tool_frame, base_frame)
 
 
     elif code == 2:
@@ -81,17 +83,18 @@ def process(received_array):
         pt_array = received_array[:3]
         z_offset = received_array[3]
 
-        tf = PC_TF
+        tf = deepcopy(BASE_TF)
+        tf_pc = PC_TF
         pose = tf_to_pose(tf, keep_header=True)
 
-        # First modify the tf to move it by the z-offset
-        pt_world = apply_tf_to_point_array(tf, np.array([0, 0, z_offset]), tool_frame).point
+        # First convert the point into the world frame, and modify the base TF
+        pt_world = apply_tf_to_point_array(tf_pc, pt_array, PC_FRAME).point
         tl = tf.transform.translation
         tl.x, tl.y, tl.z = pt_world.x, pt_world.y, pt_world.z
 
-        # Using the transformed TF, process the received point
-        pt_approach = apply_tf_to_point_array(tf, pt_array, tool_frame).point
-        pose.pose.position = pt_approach
+        # From the new TF, apply the z offset to get the final TF (pose)
+        pt_offset = apply_tf_to_point_array(tf, np.array([0, 0, z_offset]), tool_frame).point
+        pose.pose.position = pt_offset
 
         rez = plan_pose_srv(pose, True)
         success = int(rez.success)
@@ -153,7 +156,7 @@ if __name__ == '__main__':
     plan_joints_srv = rospy.ServiceProxy('plan_joints', HandleJointPlan)
     plan_pose_srv = rospy.ServiceProxy('plan_pose', HandlePosePlan)
 
-    ADDRESS = '169.254.174.52'
+    ADDRESS = '169.254.116.60'
     PORT = 10000
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
