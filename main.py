@@ -397,7 +397,7 @@ class PruningGUI(QMainWindow):
                                                  [self.execute_approach, self.retract],
                                                  name='Actions')
 
-        self.detection_combobox.currentIndexChanged.connect(lambda: self.detection_actions.reset())
+        self.detection_move_button.clicked.connect(self.move_to_box)
 
         self.detection_widget.addWidget(combo_widget)
         self.detection_widget.addWidget(self.detection_actions)
@@ -527,7 +527,7 @@ class CameraAndNetworkHandler(QObject):
             self.pc = self.cam.acquire_pc(return_rgb=False)
             self.process_pc()
 
-            self.move_robot(3, np.array([0.01, 0.0, 0]))
+            self.move_robot(3, np.array([0.01, 0.01, 0]))
 
             self.rgb_alt = self.cam.acquire_image()[0]
             self.move_robot(0)
@@ -556,7 +556,7 @@ class CameraAndNetworkHandler(QObject):
         if prop < PERC_CUTOFF:
 
             print('There were not enough points to do a SVD! Using assumption of 30 cm away')
-            self.plane = (np.array([0, 0, 1], np.array([0, 0, 0.30])))
+            self.plane = (np.array([0, 0, 0.3]), np.array([0, 0, 1.0]))
             return
 
         lower_z = np.quantile(pc[:,2], QUANT)
