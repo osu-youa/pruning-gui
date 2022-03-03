@@ -60,10 +60,13 @@ def shutdown():
 
 if __name__ == '__main__':
 
-    SERIAL_PORT = 'COM5'  # Change this to the COM port the Arduino is connected to
+    SERIAL_PORT = '/dev/ttyACM0'  # Change this to the COM port the Arduino is connected to
+
 
     # This sets up the Arduino board and defines the pins that we will be using to send and read signals
     board = Arduino(SERIAL_PORT)
+    print('=============== CONNECTED TO PORT {} ==========='.format(SERIAL_PORT))
+
     DIM = 300
     it = util.Iterator(board)
     it.setDaemon(True)
@@ -72,7 +75,7 @@ if __name__ == '__main__':
     lim0 = board.get_pin('d:5:i')
     reset = board.get_pin('d:12:o')
 
-    LAST_INIT_TIME = time()  # If the Pruner's trigger is not "pulled" for more than 180 seconds it times out and needs to be
+    LAST_INIT_TIME = 0  # If the Pruner's trigger is not "pulled" for more than 180 seconds it times out and needs to be
     # re-initialized, this tracks the time of the last time it was "pulled"
 
     rospy.init_node('cutter_node')
@@ -81,5 +84,7 @@ if __name__ == '__main__':
 
     # When the Pruner is turned on it needs to be initialized by "pulling" the trigger twice quickly which this simulates
     initialize(dig0)
+
+    print('Cutter ready to go!')
 
     rospy.spin()

@@ -11,6 +11,7 @@ from tf2_ros import TransformListener as TransformListener2, Buffer
 from tf2_geometry_msgs import do_transform_point
 from copy import deepcopy
 from std_msgs.msg import Bool
+from std_srvs.srv import Empty
 
 BASE_TF = None
 BASE_JOINTS = None
@@ -24,7 +25,11 @@ def process(received_array):
         msg = 'Abort message sent'
 
     elif code == 1:
-        msg = 'Cutting service not implemented yet!'
+
+
+        msg = 'Cutting message sent!'
+        cut_srv()
+
 
     elif code == -1:
         msg = 'Connection has successfully been established!'
@@ -46,6 +51,7 @@ if __name__ == '__main__':
     plan_pose_srv = rospy.ServiceProxy('plan_pose', HandlePosePlan)
 
     abort_pub = rospy.Publisher('abort', Bool, queue_size=1)
+    cut_srv = rospy.ServiceProxy('activate_cutters', Empty)
 
     ADDRESS = '169.254.116.60'
     PORT = 10002
