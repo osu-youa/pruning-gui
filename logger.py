@@ -1,5 +1,5 @@
 from PyQt5.QtWidgets import QMainWindow, QCheckBox, QGroupBox, QGridLayout, QVBoxLayout, QHBoxLayout, QPushButton, QSizePolicy
-from PyQt5.QtWidgets import QApplication, QHBoxLayout, QWidget, QLabel, QLineEdit, QColorDialog, QComboBox, QRadioButton
+from PyQt5.QtWidgets import QApplication, QHBoxLayout, QWidget, QLabel, QLineEdit, QColorDialog, QComboBox, QRadioButton, QScrollArea
 from PyQt5.QtCore import QRect, QTimer, QObject, QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QPainter, QPixmap, QImage
 import json
@@ -8,9 +8,22 @@ import json
 class Logger(QWidget):
     def __init__(self):
         super().__init__()
-        self.main_layout = QVBoxLayout()
-        self.setLayout(self.main_layout)
+        self.scroll = QScrollArea()
         self.items = []
+
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        layout.addWidget(self.scroll)
+
+        scroll_widget = QWidget()
+        self.main_layout = QVBoxLayout()
+        scroll_widget.setLayout(self.main_layout)
+        self.scroll.setWidget(scroll_widget)
+
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setWidgetResizable(True)
+
 
     def add_item(self, item):
         assert isinstance(item, LoggerItem)
@@ -26,6 +39,15 @@ class Logger(QWidget):
 
     def serialize(self):
         return json.dumps([item.as_dict() for item in self.items])
+
+    def add_item_type(self, item_type, *args, **kwargs):
+        item_dict = {
+            'msg': MsgItem,
+            'choice': ChoiceItem,
+            'prompt': PromptItem
+        }
+
+        self.add_item(item_dict[item_type](*args, **kwargs))
 
 
 class LoggerItem(QWidget):
@@ -148,6 +170,9 @@ class TestLogger(QMainWindow):
         self.logger.add_item(ChoiceItem('This is a choice message', choices=['Ton', 'Pei', 'Nan', 'Sha'], time=0.2))
         self.logger.add_item(PromptItem('What is your date of birth?*', required=True, time=0.3))
         self.logger.add_item(PromptItem('(Optional) What is your zodiac sign?', required=False, time=0.4))
+
+        for i in range(30):
+            self.logger.add_item_type('msg', msg='Testing')
 
         button = QPushButton('Save Results')
         layout.addWidget(button)
