@@ -38,6 +38,7 @@ class PruningGUI(QMainWindow):
         self.logger = Logger()
         self.move_descriptor = ''
         self.move_start = None
+        self.proc_start = None
 
         self.thread = QThread(self)
         self.thread.start()
@@ -174,16 +175,16 @@ class PruningGUI(QMainWindow):
     def handle_processing(self, is_end):
         if not is_end:
             print('Running processing')
-            self.move_start = time.time()
+            self.proc_start = time.time()
 
         else:
             print('Processing done!')
             ts = time.time()
-            duration = ts - self.move_start
+            duration = ts - self.proc_start
             self.logger.add_item_type('msg', msg='Processing complete! (Took {:.2f}s)'.format(duration), event='processing',
                                       descriptor='Processing', duration=duration,
                                       stamp=ts)
-            self.move_start = None
+            self.proc_start = None
 
     def load(self):
         if self.test:
@@ -323,6 +324,7 @@ class PruningGUI(QMainWindow):
         return int(click_x * im_x / pixmap_x), int(click_y * im_y / pixmap_y)
 
     def run_detection(self):
+        self.move_descriptor = 'Flow Computation'
         self.call_async(self.camera_and_network_handler.run_detection)
 
 
@@ -605,6 +607,7 @@ class CameraAndNetworkHandler(QObject):
         self.acquire_image()
         self.compute_flow()
         self.find_pruning_points()
+        self.process_pc()
 
         self.processing_end_signal.emit()
 
@@ -621,14 +624,10 @@ class CameraAndNetworkHandler(QObject):
         else:
             self.rgb_main, self.depth_img = self.cam.acquire_image()
             self.pc = self.cam.acquire_pc(return_rgb=False)
-            self.process_pc()
-
             self.move_robot(3, np.array([0.01, 0.01, 0]))
-
             self.rgb_alt = self.cam.acquire_image()[0]
             self.move_robot(0)
-            depth_display = (self.depth_img / self.depth_img.max() * 255).astype(np.uint8)
-            self.new_image_signal.emit('Depth', depth_display)
+
 
         self.new_image_signal.emit('Main RGB', self.rgb_main)
         self.new_image_signal.emit('Alt RGB', self.rgb_alt)
@@ -643,8 +642,20 @@ class CameraAndNetworkHandler(QObject):
 
         pc = self.pc.reshape(-1, 3)
         total_points = len(pc)
-        idx = (pc[:,2] > NEAR_DIST) & (pc[:,2] < FAR_DIST)
+
+        mask_resized = cv2.resize(self.mask_img[:,:,0], (self.rgb_main.shape[1], self.rgb_main.shape[0]))
+        idx = (pc[:,2] > NEAR_DIST) & (pc[:,2] < FAR_DIST) & (mask_resized.reshape(-1) > 128)
+
         pc = pc[idx]
+
+        # DEBUGGING WITH DEPTH IMAGE
+        idx_2d = idx.reshape(self.rgb_main.shape[:2])
+        idx_x, idx_y = np.where(idx_2d)
+
+        depth_display = (self.depth_img / self.depth_img.max() * 255).astype(np.uint8)
+        depth_display = np.dstack([depth_display] * 3)
+        depth_display[idx_x, idx_y] = [0, 0, 255]
+        self.new_image_signal.emit('Depth', depth_display)
 
         prop = len(pc) / total_points
         print('Proportion of foreground pts: {:.4f}'.format(prop))
@@ -939,7 +950,7 @@ if __name__ == '__main__':
     config = {
         'test': True,
         # 'test': True,
-        'test_camera': True,
+        'test_camera': False,
         # 'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\GanTrainingPairsWithCutters\train',
         # 'dummy_image_format': 'render_{}_randomized_{:05d}.png',
         # 'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\RealData\MartinDataCollection\20220109-141856-Downsized',
