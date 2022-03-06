@@ -37,6 +37,12 @@ class Logger(QWidget):
                 return False
         return True
 
+    def clear(self):
+        for item in self.items:
+            self.main_layout.removeWidget(item)
+            item.deleteLater()
+        self.items = []
+
     def serialize(self):
         return json.dumps([item.as_dict() for item in self.items])
 
@@ -175,8 +181,11 @@ class TestLogger(QMainWindow):
             self.logger.add_item_type('msg', msg='Testing')
 
         button = QPushButton('Save Results')
+        clear_button = QPushButton('Clear')
         layout.addWidget(button)
         button.clicked.connect(self.serialize)
+        clear_button.clicked.connect(self.logger.clear)
+        layout.addWidget(clear_button)
 
     def serialize(self):
 

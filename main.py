@@ -14,6 +14,7 @@ import socket
 import time
 from rs_camera import Camera
 import cv2
+from logger import Logger
 
 import matplotlib.pyplot as plt
 from mpl_toolkits import mplot3d
@@ -34,6 +35,9 @@ class PruningGUI(QMainWindow):
         self.current_box = None
         self.last_click = None
         self.cutter_mask_clicks = []
+        self.logger = Logger()
+        self.move_descriptor = ''
+        self.move_start = None
 
         self.thread = QThread(self)
         self.thread.start()
@@ -49,6 +53,8 @@ class PruningGUI(QMainWindow):
 
         self.camera_and_network_handler.moving_start_signal.connect(partial(self.handle_move, 0))
         self.camera_and_network_handler.moving_end_signal.connect(partial(self.handle_move, 1))
+        self.camera_and_network_handler.processing_start_signal.connect(partial(self.handle_processing, 0))
+        self.camera_and_network_handler.processing_end_signal.connect(partial(self.handle_processing, 1))
         self.socket_handler.return_signal.connect(self.set_temporary_action_panel_status)
 
         # GUI setup
@@ -60,6 +66,10 @@ class PruningGUI(QMainWindow):
         self.image_window.show()
 
         # Boilerplate setup
+
+        if not os.path.exists('logs'):
+            os.mkdir('logs')
+
         self.setWindowTitle('Pruning GUI')
         left_side_layout = self.init_left_layout()
         middle_layout = self.init_middle_layout()
@@ -145,9 +155,35 @@ class PruningGUI(QMainWindow):
 
     def handle_move(self, is_end):
         if not is_end:
-            print('Started moving')
+            print('Started moving ({})'.format(self.move_descriptor))
+            self.move_start = time.time()
         else:
             print('Ended moving')
+            ts = time.time()
+            duration = ts - self.move_start
+
+            if self.move_descriptor == 'Approach':
+                self.logger.add_item_type('choice', choices=['Success', 'Miss', 'Other'], required=True, msg='Approach executed! (Took {:.2f}s)'.format(duration), event='approach',
+                                          duration=ts - self.move_start, stamp=ts)
+            else:
+                self.logger.add_item_type('msg', msg='Move Event: {} (Took {:.2f}s)'.format(self.move_descriptor, duration), event='move',
+                                          descriptor=self.move_descriptor, duration=ts - self.move_start, stamp=ts)
+            self.move_start = None
+            self.move_descriptor = None
+
+    def handle_processing(self, is_end):
+        if not is_end:
+            print('Running processing')
+            self.move_start = time.time()
+
+        else:
+            print('Processing done!')
+            ts = time.time()
+            duration = ts - self.move_start
+            self.logger.add_item_type('msg', msg='Processing complete! (Took {:.2f}s)'.format(duration), event='processing',
+                                      descriptor='Processing', duration=duration,
+                                      stamp=ts)
+            self.move_start = None
 
     def load(self):
         if self.test:
@@ -187,6 +223,7 @@ class PruningGUI(QMainWindow):
         waypoint_index = self.waypoint_menu.currentData()
         target = self.waypoint_list[waypoint_index]
 
+        self.move_descriptor = 'Waypoint {}'.format(waypoint_index)
         self.call_async(self.camera_and_network_handler.move_robot, 1, target)
         self.reset_detections(clear=True)
         self.image_window.clear()
@@ -292,19 +329,31 @@ class PruningGUI(QMainWindow):
     def move_to_box(self):
 
         idx = self.detection_combobox.currentIndex()
+        if idx < 0:
+            print('No box detections!')
+            return
+
         to_send = np.zeros(4)
         to_send[:3] = self.detections[idx][0]
         to_send[3] = -0.30
 
         print('Sending move to box command {}'.format(to_send))
+        waypoint_idx = self.waypoint_menu.currentData()
+        self.move_descriptor = 'Detection {} for Waypoint {}'.format(idx, waypoint_idx)
         self.call_async(self.camera_and_network_handler.move_robot, 4, to_send)
 
     def execute_approach(self):
+        self.move_descriptor = 'Approach'
         self.call_async(self.camera_and_network_handler.execute_approach)
 
 
     def retract(self):
+        self.move_descriptor = 'Retract'
         self.call_async(self.camera_and_network_handler.move_robot, 0)
+
+    def abort(self):
+        self.send_socket_command_and_reset(np.array([0]))
+        self.logger.add_item_type('prompt', msg='Abort sent!', event='abort', required=True, stamp=time.time())
 
     def cut(self):
 
@@ -313,6 +362,7 @@ class PruningGUI(QMainWindow):
 
         if shift_clicked:
             self.send_socket_command_and_reset(np.array([1]))
+            self.logger.add_item_type('msg', msg='Cut executed!', event='cut', stamp=time.time())
         else:
             self.set_temporary_action_panel_status('Please hold the Shift button down when cutting!')
 
@@ -323,6 +373,22 @@ class PruningGUI(QMainWindow):
     def set_temporary_action_panel_status(self, text):
         self.action_panel_status.setText(text)
         QTimer.singleShot(3000, lambda: self.action_panel_status.setText(''))
+
+    def clear_log(self):
+        self.logger.clear()
+
+
+    def save_log(self):
+
+        ts = int(time.time())
+        save_path = os.path.join('logs', f'{ts}.json')
+        with open(save_path, 'w') as fh:
+            fh.write(self.logger.serialize())
+
+        if not self.logger.complete:
+            self.logger_status.setText('Saved! (Warning, not all fields were filled out)')
+        else:
+            self.logger_status.setText('Saved!')
 
     def init_left_layout(self):
         layout = QVBoxLayout()
@@ -376,10 +442,8 @@ class PruningGUI(QMainWindow):
         move_button.clicked.connect(self.move_robot_waypoint)
         self.next_button.clicked.connect(self.move_robot_next)
 
-        return layout
+        # Moving box detections here
 
-    def init_right_layout(self):
-        layout = QVBoxLayout()
         self.detection_widget = QVGroupBox('Detected Boxes')
         self.detection_status = QLabel('No detected boxes')
         self.detection_widget.addWidget(self.detection_status)
@@ -394,14 +458,40 @@ class PruningGUI(QMainWindow):
         combo_layout.addWidget(self.detection_move_button)
 
         self.detection_actions = SequentialButtonList(['Execute Approach', 'Retract'],
-                                                 [self.execute_approach, self.retract],
-                                                 name='Actions')
+                                                      [self.execute_approach, self.retract],
+                                                      name='Actions')
 
         self.detection_move_button.clicked.connect(self.move_to_box)
 
         self.detection_widget.addWidget(combo_widget)
         self.detection_widget.addWidget(self.detection_actions)
         self.reset_detections()
+
+
+
+        return layout
+
+    def init_right_layout(self):
+        layout = QVBoxLayout()
+
+        layout.addWidget(self.logger)
+        save_logger_button = QPushButton('Save Log')
+        clear_logger_button = QPushButton('Clear Log')
+        add_custom_button = QPushButton('Add Note')
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addWidget(save_logger_button)
+        buttons_layout.addWidget(clear_logger_button)
+        buttons_layout.addWidget(add_custom_button)
+
+        layout.addLayout(buttons_layout)
+
+        self.logger_status = QLabel()
+        layout.addWidget(self.logger_status)
+
+        save_logger_button.clicked.connect(self.save_log)
+        clear_logger_button.clicked.connect(self.clear_log)
+        add_custom_button.clicked.connect(lambda: self.logger.add_item_type('prompt', msg='Custom Note', event='note',
+                                                                            required=False, stamp=time.time()))
 
         return layout
 
@@ -412,7 +502,7 @@ class PruningGUI(QMainWindow):
         button_layout = QHBoxLayout()
 
         buttons = [
-            ('Abort', "background-color: red; color: white", partial(self.send_socket_command_and_reset, np.array([0]))),
+            ('Abort', "background-color: red; color: white", self.abort),
             ('Cut (Hold Shift)', "background-color: green;", self.cut)
         ]
 
@@ -469,6 +559,8 @@ class CameraAndNetworkHandler(QObject):
     new_image_signal = pyqtSignal(str, np.ndarray)
     moving_start_signal = pyqtSignal()
     moving_end_signal = pyqtSignal()
+    processing_start_signal = pyqtSignal()
+    processing_end_signal = pyqtSignal()
     status_signal = pyqtSignal(str)
 
     def __init__(self, config):
@@ -508,9 +600,13 @@ class CameraAndNetworkHandler(QObject):
 
     def run_detection(self):
 
+        self.processing_start_signal.emit()
+
         self.acquire_image()
         self.compute_flow()
         self.find_pruning_points()
+
+        self.processing_end_signal.emit()
 
     def acquire_image(self):
         if self.cam is None:
