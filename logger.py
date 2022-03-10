@@ -3,13 +3,19 @@ from PyQt5.QtWidgets import QApplication, QHBoxLayout, QWidget, QLabel, QLineEdi
 from PyQt5.QtCore import QRect, QTimer, QObject, QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QPainter, QPixmap, QImage
 import json
-
+import os
+from collections import defaultdict
+from PIL import Image
+import numpy as np
 
 class Logger(QWidget):
     def __init__(self):
         super().__init__()
         self.scroll = QScrollArea()
         self.items = []
+        self.autosave = None
+        self.suffix_counters = defaultdict(lambda: 0)
+        self.prev_log = []
 
         layout = QVBoxLayout()
         self.setLayout(layout)
@@ -30,6 +36,11 @@ class Logger(QWidget):
         self.items.append(item)
         self.main_layout.addWidget(item)
 
+        if self.autosave:
+            with open(os.path.join(self.autosave, 'log.json'), 'w') as fh:
+                fh.write(self.serialize())
+
+
     @property
     def complete(self):
         for item in self.items:
@@ -44,7 +55,7 @@ class Logger(QWidget):
         self.items = []
 
     def serialize(self):
-        return json.dumps([item.as_dict() for item in self.items])
+        return json.dumps(self.prev_log + [item.as_dict() for item in self.items])
 
     def add_item_type(self, item_type, *args, **kwargs):
         item_dict = {
@@ -54,6 +65,41 @@ class Logger(QWidget):
         }
 
         self.add_item(item_dict[item_type](*args, **kwargs))
+
+    def set_autosave_directory(self, dir):
+        if not dir:
+            self.autosave = False
+            self.prev_log = []
+
+        if not os.path.exists(dir):
+            os.mkdir(dir)
+        self.autosave = dir
+
+        log_file = os.path.join(self.autosave, 'log.json')
+        if os.path.exists(log_file):
+            with open(log_file, 'r') as fh:
+                self.prev_log = json.load(fh)
+        else:
+            self.prev_log = []
+
+    def autosave_img(self, img, suffix=''):
+        if not self.autosave:
+            raise Exception("Please set an autosave directory first!")
+        apd = ('_' if suffix else '') + suffix
+        while True:
+            counter = self.suffix_counters[suffix]
+            file_name = f'{counter}{apd}.png'
+            save_path = os.path.join(self.autosave, file_name)
+            if os.path.exists(save_path):
+                self.suffix_counters[suffix] += 1
+                continue
+
+            if img.shape == 2 or img.shape[2] == 1:
+                img = np.dstack([img] * 3)
+            elif img.shape[2] == 2:
+                img = np.dstack([img, img[:,:,1]])
+            Image.fromarray(img).save(save_path)
+            return file_name
 
 
 class LoggerItem(QWidget):

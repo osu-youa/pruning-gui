@@ -59,8 +59,8 @@ class PruningGUI(QMainWindow):
         self.socket_handler.return_signal.connect(self.set_temporary_action_panel_status)
 
         # GUI setup
-        self.image_window = ImageDisplay([['Main RGB', 'Alt RGB'], ['Depth', 'Flow'], ['Mask', 'Boxes']],
-                                         names=['RGB', 'Depth/Flow', 'Processed'])
+        self.image_window = ImageDisplay([['Main RGB', 'Alt RGB'], ['Depth', 'Flow'], ['Mask', 'Boxes'], ['RGB Live', 'Mask Live']],
+                                         names=['RGB', 'Depth/Flow', 'Processed', 'Live'])
         self.image_window.register_click_callback('Mask', self.mask_click_callback)
         self.image_window.register_click_callback('Main RGB', self.cutter_mask_click_callback)
         self.image_window.setWindowTitle('Images')
@@ -181,9 +181,20 @@ class PruningGUI(QMainWindow):
             print('Processing done!')
             ts = time.time()
             duration = ts - self.proc_start
+
+            imgs = {
+                'rgb': self.camera_and_network_handler.rgb_main,
+                'flow': self.camera_and_network_handler.flow_img,
+                'mask': self.camera_and_network_handler.mask_img,
+            }
+
+            paths = {}
+            for suffix, img in imgs.items():
+                paths[suffix] = self.logger.autosave_img(img, suffix)
+
             self.logger.add_item_type('msg', msg='Processing complete! (Took {:.2f}s)'.format(duration), event='processing',
                                       descriptor='Processing', duration=duration,
-                                      stamp=ts)
+                                      stamp=ts, images=paths)
             self.proc_start = None
 
     def load(self):
@@ -191,14 +202,23 @@ class PruningGUI(QMainWindow):
             waypoints = np.random.uniform(-1, 1, (10,3))
             self.reset_waypoints(waypoints)
         else:
-            print('Loading set waypoints for Millrace robot!')
-            waypoints = [
-                [1.069, -1.401, -1.649, -0.178, 1.152, 3.182],
-                [0.804, -1.424, -1.634, -0.162, 1.416, 3.159],
-                [0.587, -1.484, -1.582, -0.153, 1.633, 3.142],
-                [0.333, -1.609, -1.462, -0.152, 1.886, 3.121],
-            ]
+            file = self.cfg_load.text().strip()
+            print('Loading waypoints from {}!'.format(file))
+            waypoints = []
+            with open(os.path.join('cfgs', file)) as fh:
+                for line in fh.readlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    vals = np.array([float(x) for x in line.split(',')])
+                    waypoints.append(vals)
+
             self.reset_waypoints(np.array(waypoints))
+
+        tree_id = self.tree_id_label.text().strip()
+        if tree_id:
+            self.logger.set_autosave_directory(os.path.join('logs', tree_id))
+
 
     def move_robot_next(self):
         if not len(self.waypoint_list) or self.current_waypoint is None:
@@ -268,15 +288,20 @@ class PruningGUI(QMainWindow):
                 yvals, xvals = np.where(valid_pix)
                 pix = np.array([xvals, yvals]).T + [x1, y1]
 
-                avg_pix = pix.mean(axis=0)
-
-
                 pc = self.camera_and_network_handler.pc
                 if pc is not None:
 
-                    plane_c, plane_normal = self.camera_and_network_handler.plane
-                    ray = np.array(self.camera_and_network_handler.cam.deproject_pixel(avg_pix, 1.0))
-                    target = line_plane_intersection(plane_normal, plane_c, ray)
+                    subsetted_pc = self.camera_and_network_handler.pc[pix[:, 1], pix[:, 0]]
+                    subsetted_pc = subsetted_pc[(subsetted_pc[:, 2] < 0.7) & (subsetted_pc[:, 2] > 0.0)]
+                    if len(subsetted_pc) > 20:
+                        target = subsetted_pc.mean(axis=0)
+                        print('Using point cloud estimate for target')
+                    else:
+                        avg_pix = pix.mean(axis=0)
+                        plane_c, plane_normal = self.camera_and_network_handler.plane
+                        ray = np.array(self.camera_and_network_handler.cam.deproject_pixel(avg_pix, 1.0))
+                        target = line_plane_intersection(plane_normal, plane_c, ray)
+                        print('Using planar estimate for target')
 
                 else:
                     print('No PC detected, filling with dummy detections')
@@ -311,7 +336,7 @@ class PruningGUI(QMainWindow):
             print('Click at {} recorded!'.format(coord))
 
 
-    def convert_click_coord(self, event, window):
+    def convert_click_coord(self, event, window, tol=6):
         click_x = event.pos().x()
         click_y = event.pos().y()
 
@@ -321,7 +346,17 @@ class PruningGUI(QMainWindow):
 
         im_y, im_x = self.camera_and_network_handler.rgb_main.shape[:2]
 
-        return int(click_x * im_x / pixmap_x), int(click_y * im_y / pixmap_y)
+        final_x, final_y = int(click_x * im_x / pixmap_x), int(click_y * im_y / pixmap_y)
+        if final_x < tol:
+            final_x = 0
+        if final_y < tol:
+            final_y = 0
+        if final_x >= im_x - tol:
+            final_x = im_x - 1
+        if final_y >= im_y - tol:
+            final_y = im_y - 1
+
+        return final_x, final_y
 
     def run_detection(self):
         self.move_descriptor = 'Flow Computation'
@@ -342,7 +377,10 @@ class PruningGUI(QMainWindow):
         print('Sending move to box command {}'.format(to_send))
         waypoint_idx = self.waypoint_menu.currentData()
         self.move_descriptor = 'Detection {} for Waypoint {}'.format(idx, waypoint_idx)
-        self.call_async(self.camera_and_network_handler.move_robot, 4, to_send)
+        self.call_async(self.camera_and_network_handler.move_robot, 4, to_send, update_live=True)
+
+    def update_rgb(self):
+        self.call_async(self.camera_and_network_handler.update_rgb)
 
     def execute_approach(self):
         self.move_descriptor = 'Approach'
@@ -392,12 +430,15 @@ class PruningGUI(QMainWindow):
         else:
             self.logger_status.setText('Saved!')
 
+
+
     def init_left_layout(self):
         layout = QVBoxLayout()
-        save_button = QPushButton('Save')
+        self.cfg_load = QLineEdit('joint_states.txt')
+        self.tree_id_label = QLineEdit('1')
         load_button = QPushButton('Load')
 
-        all_widgets = [save_button, load_button]
+        all_widgets = [self.cfg_load, load_button, QLabel('Tree ID'), self.tree_id_label]
         for widget in all_widgets:
             layout.addWidget(widget)
 
@@ -459,8 +500,8 @@ class PruningGUI(QMainWindow):
         combo_layout.addWidget(self.detection_combobox)
         combo_layout.addWidget(self.detection_move_button)
 
-        self.detection_actions = SequentialButtonList(['Execute Approach', 'Retract'],
-                                                      [self.execute_approach, self.retract],
+        self.detection_actions = SequentialButtonList(['Update RGB', 'Execute Approach', 'Retract'],
+                                                      [self.update_rgb, self.execute_approach, self.retract],
                                                       name='Actions')
 
         self.detection_move_button.clicked.connect(self.move_to_box)
@@ -634,11 +675,17 @@ class CameraAndNetworkHandler(QObject):
 
 
     def process_pc(self):
+        if self.pc is None:
+            print('Loading test plane')
+            self.plane = (np.array([0, 0, 0.3]), np.array([0, 0, 1.0]))
+            return
+
+
         # Used to determine the plane corresponding to the PC
         FAR_DIST = 1.0
         NEAR_DIST = 0.05
         QUANT = 0.25
-        PERC_CUTOFF = 0.01
+        PERC_CUTOFF = 0.005
 
         pc = self.pc.reshape(-1, 3)
         total_points = len(pc)
@@ -681,12 +728,16 @@ class CameraAndNetworkHandler(QObject):
         least_sig = v[2]
         self.plane = (center, least_sig)
 
+        print('Computed plane:\nCenter: {:.3f}, {:.3f}, {:.3f}\nNormal: {:.3f}, {:.3f}, {:.3f}'.format(*center, *least_sig))
 
-    def move_robot(self, code, pt=None):
+
+
+    def move_robot(self, code, pt=None, emit=True, update_live=False):
 
         # See move_server.py for defined codes
 
-        self.moving_start_signal.emit()
+        if emit:
+            self.moving_start_signal.emit()
         to_send = [code]
         if pt is not None:
             to_send.extend(pt)
@@ -705,9 +756,12 @@ class CameraAndNetworkHandler(QObject):
             sock.close()
             print('Move server response: {}'.format(response))
         print('Sent robot command: {}'.format(', '.join(['{:.3f}'.format(x) for x in to_send])))
+        if emit:
+            self.moving_end_signal.emit()
+            self.status_signal.emit('Done with robot move!')
 
-        self.moving_end_signal.emit()
-        self.status_signal.emit('Done with robot move!')
+        if update_live:
+            self.new_image_signal.emit('RGB Live', self.cam.acquire_image()[0])
 
     def load_networks(self):
         if self.image_processor is not None:
@@ -716,7 +770,15 @@ class CameraAndNetworkHandler(QObject):
 
         self.image_processor = ImageProcessor((424, 240), (128, 128), use_flow=True, gan_name=self.config['gan_name'],
                                               gan_output_channels=self.config.get('gan_output_channels', 3))
-        self.rl_system = PPO.load(self.config['rl_model_path'])
+        try:
+            self.rl_system = PPO.load(self.config['rl_model_path'])
+        except AssertionError:
+            custom_objs = {
+                'learning_rate': 0.0,
+                'lr_schedule': lambda _: 0.0,
+                'clip_range': lambda _: 0.0,
+            }
+            self.rl_system = PPO.load(self.config['rl_model_path'], custom_objects=custom_objs)
         self.status_signal.emit('Done loading networks!')
 
     def compute_flow(self):
@@ -738,9 +800,22 @@ class CameraAndNetworkHandler(QObject):
     def find_pruning_points(self):
         self.status_signal.emit('Pruning point detection is not implemented, please select manually!')
 
+    def update_rgb(self):
+        img, _ = self.cam.acquire_image()
+        self.new_image_signal.emit('RGB Live', img)
+
     def execute_approach(self):
 
         self.moving_start_signal.emit()
+
+        if not self.test:
+            # Acquire an image to feed through the image processor
+            self.move_robot(5, [0.01, 0.01, 0], emit=False)
+            img, _ = self.cam.acquire_image()
+            self.image_processor.process(img)
+            self.move_robot(5, [-0.01, -0.01, 0], emit=False)
+            time.sleep(1.0)
+
 
         sock = None
         if not self.test or (self.test and self.config['use_dummy_socket']):
@@ -762,11 +837,11 @@ class CameraAndNetworkHandler(QObject):
                     img = np.array(Image.open(file_path), dtype=np.uint8)
                     seg = self.image_processor.process(img)
 
-                    self.new_image_signal.emit('Main RGB', img)
+                    self.new_image_signal.emit('RGB Live', img)
                     self.new_image_signal.emit('Flow', self.image_processor.last_flow)
-                    self.new_image_signal.emit('Mask', seg)
+                    self.new_image_signal.emit('Mask Live', seg)
 
-                    action = self.rl_system.predict(seg)[0]
+                    action = self.rl_system.predict(seg, deterministic=True)[0]
                     if sock is not None:
                         sock.sendall(action.tobytes())
                         np.frombuffer(sock.recv(1024), dtype=np.uint8) # Synchronization
@@ -775,7 +850,7 @@ class CameraAndNetworkHandler(QObject):
 
             else:
                 start = time.time()
-                action_freq = 0.5
+                action_freq = 1.0
                 duration = self.config.get('approach_duration', 10.0)
 
                 last_time = 0.0
@@ -794,9 +869,9 @@ class CameraAndNetworkHandler(QObject):
                     if self.cutter_gt is not None:
                         seg[:,:,-1] = cv2.resize(self.cutter_gt, (seg.shape[1], seg.shape[0]))
 
-                    self.new_image_signal.emit('Main RGB', img)
+                    self.new_image_signal.emit('RGB Live', img)
                     self.new_image_signal.emit('Flow', self.image_processor.last_flow)
-                    self.new_image_signal.emit('Mask', seg)
+                    self.new_image_signal.emit('Mask Live', seg)
 
                     action = self.rl_system.predict(seg)[0]
                     speed = self.config.get('cutter_speed', 0.03)
@@ -950,7 +1025,7 @@ if __name__ == '__main__':
     config = {
         'test': True,
         # 'test': True,
-        'test_camera': False,
+        'test_camera': True,
         # 'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\GanTrainingPairsWithCutters\train',
         # 'dummy_image_format': 'render_{}_randomized_{:05d}.png',
         # 'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\RealData\MartinDataCollection\20220109-141856-Downsized',
@@ -964,13 +1039,13 @@ if __name__ == '__main__':
         'use_dummy_socket': False,
         'move_server_port': 10000,
         'vel_server_port': 10001,
-        'rl_model_path': r'C:\Users\davijose\PycharmProjects\pybullet-test\best_model_1_0.zip',
+        'rl_model_path': r'C:\Users\davijose\PycharmProjects\pybullet-test\best_model_1_0_imcontrol.zip',
         'approach_duration': 10.0,
 
     }
 
     if not config['test']:
-        config['socket_ip'] = '169.254.116.60'
+        config['socket_ip'] = '169.254.57.209'
 
     procs = []
     if config['test'] and config['use_dummy_socket']:

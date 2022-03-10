@@ -59,6 +59,8 @@ class Camera:
             raise Exception("No PC has been calculated so intrinsics have not been computed. Please compute a PC first")
         return np.array(rs.rs2_deproject_pixel_to_point(self.last_intrinsics, pix, depth_scale))
 
+    def project_point(self, pt):
+        return rs.rs2_project_point_to_pixel(self.last_intrinsics, pt)
 
 
 if __name__ == '__main__':
@@ -66,7 +68,7 @@ if __name__ == '__main__':
     import matplotlib.pyplot as plt
     from time import sleep
 
-    cam = Camera(424, 240)
+    cam = Camera(640, 480)
 
     # Testing point cloud generation
     pc, rgb = cam.acquire_pc(return_rgb=True)
