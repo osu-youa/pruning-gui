@@ -31,7 +31,7 @@ class DetectronBranchNetwork:
 
         self.predictor = DefaultPredictor(cfg)
 
-    def output_branch_targets(self, img, convert_to_bgr=False, output_diagnostic=True):
+    def output_branch_targets(self, img, convert_to_bgr=False, output_diagnostic=True, vec_offset_draw=50):
         img_orig = img
         if convert_to_bgr:
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
@@ -41,7 +41,7 @@ class DetectronBranchNetwork:
         bps = detector.branch_points
         diagnostic = None
         if output_diagnostic:
-            diagnostic = detector.generate_output_image(img_orig, vec_offset_draw=50)
+            diagnostic = detector.generate_output_image(img_orig, vec_offset_draw=vec_offset_draw)
 
         return bps, diagnostic
 

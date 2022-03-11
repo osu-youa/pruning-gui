@@ -26,13 +26,14 @@ class BranchPointDetector:
         for i in range(len(outputs['instances'])):
 
             instance = outputs['instances'][i]
+            score = float(instance.scores.cpu())
             pred_class = int(instance.pred_classes.cpu()[0].numpy())
             if pred_class in [trunk_class, sb_class]:
 
                 mask = instance.pred_masks[0].cpu().numpy() * 255
                 name = 'trunk' if pred_class == trunk_class else 'sidebranch'
 
-                images.append({'name': name, 'image': mask.T})
+                images.append({'name': name, 'image': mask.T, 'confidence': score})
 
         return cls(images)
 
@@ -59,7 +60,7 @@ class BranchPointDetector:
             except IndexError:
                 name = 'original'
 
-            im_data = {'name': name}
+            im_data = {'name': name, 'confidence': 1.0}
             im_orig = MPLimage.imread(os.path.join(path, filename))
             if len(im_orig.shape) is 2:
                 im_data["image"] = np.transpose(im_orig)
@@ -87,13 +88,18 @@ class BranchPointDetector:
                 im['stats'] = self.stats_image(im['image'])
             self.classifications[name].append(im)
 
+        self.classifications['trunk'].sort(key=lambda im: im['confidence'], reverse=True)
+
     def find_branch_points(self):
         branch_points = []
-        for im_trunk in self.classifications['trunk']:
-            for im_branch in self.classifications['sidebranch']:
+        for im_branch in self.classifications['sidebranch']:
+            # Each side branch should be matched with at most one trunk
+            # We sort the trunks by confidence to determine the match (though in reality better criterion might be used)
+            for im_trunk in self.classifications['trunk']:
                 bp = self.find_branch_point(im_trunk, im_branch)
                 if bp is not None:
                     branch_points.append(bp)
+                    break
 
         return branch_points
 
@@ -103,6 +109,19 @@ class BranchPointDetector:
     def generate_output_image(self, base_img, output_path=None, vec_offset_draw=0):
 
         img = base_img.copy()
+
+        # Apply the base mask
+        colors = {
+            'trunk': (212, 111, 49),
+            'sidebranch': (77, 160, 201),
+            'spur': (209, 42, 51),
+        }
+        for im in self.images:
+            if im['name'] not in colors:
+                continue
+            mask = (im['image'] > 128).T
+            img[mask] = colors[im['name']]
+
         for im in self.images:
             stats = im.get('stats')
             if stats is None:

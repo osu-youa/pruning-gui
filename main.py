@@ -10,6 +10,7 @@ from functools import partial
 from PIL import Image
 from stable_baselines3.ppo import PPO
 from image_processor import ImageProcessor
+from wrappers.detectron import DetectronBranchNetwork
 import socket
 import time
 from rs_camera import Camera
@@ -39,6 +40,7 @@ class PruningGUI(QMainWindow):
         self.move_descriptor = ''
         self.move_start = None
         self.proc_start = None
+        self.use_slider = False
 
         self.thread = QThread(self)
         self.thread.start()
@@ -116,42 +118,42 @@ class PruningGUI(QMainWindow):
         self.detection_combobox.clear()
         self.last_click = None
 
-        if clear or len(self.detections) == 0:
-            self.detections = []
+        if clear or len(self.camera_and_network_handler.detections) == 0:
+            self.camera_and_network_handler.detections = []
             self.detection_status.setText('No detections')
             self.detection_combobox.setDisabled(True)
             self.detection_actions.disable_all()
-            self.image_window.update_image('Boxes', np.zeros((1,1,3), dtype=np.uint8))
+            # self.image_window.update_image('Boxes', np.zeros((1,1,3), dtype=np.uint8))
             return
 
         if self.camera_and_network_handler.mask_img is None:
             raise Exception("Detections added but no mask has been generated!")
 
-        colors = [(0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255)]
-        h, w = self.camera_and_network_handler.rgb_main.shape[:2]
-        annotated_mask = cv2.resize(self.camera_and_network_handler.mask_img, (w,h))
-
-        for i, detection in enumerate(self.detections):
-
-            target, pix = detection
-            color = colors[i%len(colors)]
-
-            x1, y1 = pix.min(axis=0)
-            x2, y2 = pix.max(axis=0)
-
-            annotated_mask = cv2.rectangle(annotated_mask, (x1, y1), (x2, y2), color=color, thickness=3)
-            annotated_mask = cv2.putText(annotated_mask, str(i+1), (x1+5, y2-5), cv2.FONT_HERSHEY_SIMPLEX, fontScale=2,
-                                         color=color, thickness=2)
-
-
-            txt = '{}: {:.3f}, {:.3f}, {:.3f}'.format(i+1, *target)
-            self.detection_combobox.addItem(txt)
-
-        self.image_window.update_image('Boxes', annotated_mask, width=256)
+        # colors = [(0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255)]
+        # h, w = self.camera_and_network_handler.rgb_main.shape[:2]
+        # annotated_mask = cv2.resize(self.camera_and_network_handler.mask_img, (w,h))
+        #
+        # for i, detection in enumerate(self.camera_and_network_handler.detections):
+        #
+        #     target, pix = detection
+        #     color = colors[i%len(colors)]
+        #
+        #     x1, y1 = pix.min(axis=0)
+        #     x2, y2 = pix.max(axis=0)
+        #
+        #     annotated_mask = cv2.rectangle(annotated_mask, (x1, y1), (x2, y2), color=color, thickness=3)
+        #     annotated_mask = cv2.putText(annotated_mask, str(i+1), (x1+5, y2-5), cv2.FONT_HERSHEY_SIMPLEX, fontScale=2,
+        #                                  color=color, thickness=2)
+        #
+        #
+        #     txt = '{}: {:.3f}, {:.3f}, {:.3f}'.format(i+1, *target)
+        #     self.detection_combobox.addItem(txt)
+        #
+        # self.image_window.update_image('Boxes', annotated_mask, width=256)
 
         self.detection_combobox.setEnabled(True)
         self.detection_combobox.setCurrentIndex(0)
-        self.detection_status.setText('Detected {} boxes'.format(len(self.detections)))
+        self.detection_status.setText('Detected {} boxes'.format(len(self.camera_and_network_handler.detections)))
         self.detection_actions.reset()
 
     def handle_move(self, is_end):
@@ -181,6 +183,8 @@ class PruningGUI(QMainWindow):
             print('Processing done!')
             ts = time.time()
             duration = ts - self.proc_start
+
+            self.reset_detections()
 
             imgs = {
                 'rgb': self.camera_and_network_handler.rgb_main,
@@ -213,6 +217,19 @@ class PruningGUI(QMainWindow):
                     vals = np.array([float(x) for x in line.split(',')])
                     waypoints.append(vals)
 
+            self.use_slider = self.use_slider_checkbox.isChecked()
+            if self.use_slider:
+                new_waypoints = []
+                interval = float(self.use_slider_interval.text().strip())
+                vals = np.arange(0, 0.75, interval)
+                for j, val in enumerate(vals):
+                    direction = 1 if not j%2 else -1
+                    for wp in waypoints[::direction]:
+                        combined = np.concatenate([[val], wp])
+                        new_waypoints.append(combined)
+                waypoints = new_waypoints
+                self.call_async(self.camera_and_network_handler.move_robot, 6, np.array([0.0]))
+
             self.reset_waypoints(np.array(waypoints))
 
         tree_id = self.tree_id_label.text().strip()
@@ -243,11 +260,13 @@ class PruningGUI(QMainWindow):
 
         waypoint_index = self.waypoint_menu.currentData()
         target = self.waypoint_list[waypoint_index]
+        code = 6 if self.use_slider else 1
 
         self.move_descriptor = 'Waypoint {}'.format(waypoint_index)
-        self.call_async(self.camera_and_network_handler.move_robot, 1, target)
+        self.call_async(self.camera_and_network_handler.move_robot, code, target)
         self.reset_detections(clear=True)
         self.image_window.clear()
+        self.current_waypoint = waypoint_index
 
 
     def compute_flow(self):
@@ -309,7 +328,7 @@ class PruningGUI(QMainWindow):
 
                 detection = (target, pix)
                 print('New target at: {:.3f}, {:.3f}, {:.3f}'.format(*target))
-                self.detections.append(detection)
+                self.camera_and_network_handler.detections.append(detection)
 
                 self.reset_detections()
 
@@ -371,7 +390,7 @@ class PruningGUI(QMainWindow):
             return
 
         to_send = np.zeros(4)
-        to_send[:3] = self.detections[idx][0]
+        to_send[:3] = self.camera_and_network_handler.detections[idx][0]
         to_send[3] = -0.30
 
         print('Sending move to box command {}'.format(to_send))
@@ -438,7 +457,17 @@ class PruningGUI(QMainWindow):
         self.tree_id_label = QLineEdit('1')
         load_button = QPushButton('Load')
 
-        all_widgets = [self.cfg_load, load_button, QLabel('Tree ID'), self.tree_id_label]
+        self.use_slider_checkbox = QCheckBox()
+        self.use_slider_checkbox.setChecked(True)
+        self.use_slider_interval = QLineEdit('0.10')
+        use_slider_widget = QWidget()
+        use_slider_layout = QHBoxLayout()
+        use_slider_layout.addWidget(self.use_slider_checkbox)
+        use_slider_layout.addWidget(self.use_slider_interval)
+        use_slider_widget.setLayout(use_slider_layout)
+        self.use_slider_checkbox.clicked.connect(lambda: self.use_slider_interval.setEnabled(self.use_slider_checkbox.isChecked()))
+
+        all_widgets = [self.cfg_load, load_button, QLabel('Tree ID'), self.tree_id_label, QLabel('Use Slider'), use_slider_widget]
         for widget in all_widgets:
             layout.addWidget(widget)
 
@@ -627,11 +656,13 @@ class CameraAndNetworkHandler(QObject):
         self.mask_img = None
         self.mask_detections = None
         self.cutter_gt = None
+        self.detections = []
 
         # Loaded utilites
         self.image_processor = None
         self.identifier = None
         self.rl_system = None
+        self.detectron_network = None
 
         self.load_cutter_gt()
 
@@ -647,8 +678,8 @@ class CameraAndNetworkHandler(QObject):
 
         self.acquire_image()
         self.compute_flow()
-        self.find_pruning_points()
         self.process_pc()
+        self.find_pruning_points()
 
         self.processing_end_signal.emit()
 
@@ -665,7 +696,7 @@ class CameraAndNetworkHandler(QObject):
         else:
             self.rgb_main, self.depth_img = self.cam.acquire_image()
             self.pc = self.cam.acquire_pc(return_rgb=False)
-            self.move_robot(3, np.array([0.01, 0.01, 0]))
+            self.move_robot(3, np.array([0.00, 0.015, 0]))
             self.rgb_alt = self.cam.acquire_image()[0]
             self.move_robot(0)
 
@@ -779,6 +810,8 @@ class CameraAndNetworkHandler(QObject):
                 'clip_range': lambda _: 0.0,
             }
             self.rl_system = PPO.load(self.config['rl_model_path'], custom_objects=custom_objs)
+
+        self.detectron_network = DetectronBranchNetwork(self.config['detectron_path'])
         self.status_signal.emit('Done loading networks!')
 
     def compute_flow(self):
@@ -798,7 +831,23 @@ class CameraAndNetworkHandler(QObject):
         self.status_signal.emit('Flows computed!')
 
     def find_pruning_points(self):
-        self.status_signal.emit('Pruning point detection is not implemented, please select manually!')
+        self.status_signal.emit('Now computing pruning points...')
+        branch_dist = 50
+        branch_points, diagnostic = self.detectron_network.output_branch_targets(self.rgb_main, convert_to_bgr=True, vec_offset_draw=branch_dist, output_diagnostic=True)
+
+        plane_c, plane_normal = self.plane
+        targets = []
+
+        print('Using planar estimate for target')
+        for p, v in branch_points:
+            bp = p + branch_dist * v
+            ray = np.array(self.cam.deproject_pixel(bp, 1.0))
+            target = line_plane_intersection(plane_normal, plane_c, ray)
+            targets.append(target)
+
+        self.detections = targets
+        self.new_image_signal.emit('Boxes', diagnostic)
+        self.status_signal.emit('Pruning point selection done!')
 
     def update_rgb(self):
         img, _ = self.cam.acquire_image()
@@ -810,10 +859,10 @@ class CameraAndNetworkHandler(QObject):
 
         if not self.test:
             # Acquire an image to feed through the image processor
-            self.move_robot(5, [0.01, 0.01, 0], emit=False)
+            self.move_robot(5, [0.00, 0.015, 0], emit=False)
             img, _ = self.cam.acquire_image()
             self.image_processor.process(img)
-            self.move_robot(5, [-0.01, -0.01, 0], emit=False)
+            self.move_robot(5, [0, -0.015, 0], emit=False)
             time.sleep(1.0)
 
 
@@ -826,6 +875,7 @@ class CameraAndNetworkHandler(QObject):
             sock.connect(address)
 
         self.image_processor.reset()
+        flow_append = 'flowappend' in self.config['rl_model_path']
         try:
             if self.cam is None:
                 path = self.config['dummy_image_path']
@@ -840,6 +890,10 @@ class CameraAndNetworkHandler(QObject):
                     self.new_image_signal.emit('RGB Live', img)
                     self.new_image_signal.emit('Flow', self.image_processor.last_flow)
                     self.new_image_signal.emit('Mask Live', seg)
+
+                    if flow_append:
+                        flow_to_append = cv2.resize(self.image_processor.last_flow, (seg.shape[1], seg.shape[0]))
+                        seg = np.dstack([seg, flow_to_append])
 
                     action = self.rl_system.predict(seg, deterministic=True)[0]
                     if sock is not None:
@@ -872,6 +926,10 @@ class CameraAndNetworkHandler(QObject):
                     self.new_image_signal.emit('RGB Live', img)
                     self.new_image_signal.emit('Flow', self.image_processor.last_flow)
                     self.new_image_signal.emit('Mask Live', seg)
+
+                    if flow_append:
+                        flow_to_append = cv2.resize(self.image_processor.last_flow, (seg.shape[1], seg.shape[0]))
+                        seg = np.dstack([seg, flow_to_append])
 
                     action = self.rl_system.predict(seg)[0]
                     speed = self.config.get('cutter_speed', 0.03)
@@ -1023,8 +1081,9 @@ def async_wrapper(func):
 if __name__ == '__main__':
 
     config = {
+        # 'test': False,
         'test': True,
-        # 'test': True,
+        # 'test_camera': False,
         'test_camera': True,
         # 'dummy_image_path': r'C:\Users\davijose\Pictures\TrainingData\GanTrainingPairsWithCutters\train',
         # 'dummy_image_format': 'render_{}_randomized_{:05d}.png',
@@ -1039,7 +1098,9 @@ if __name__ == '__main__':
         'use_dummy_socket': False,
         'move_server_port': 10000,
         'vel_server_port': 10001,
-        'rl_model_path': r'C:\Users\davijose\PycharmProjects\pybullet-test\best_model_1_0_imcontrol.zip',
+        'rl_model_path': r'C:\Users\davijose\PycharmProjects\pybullet-test\best_model_1_0_imcontrol_flowappend.zip',
+        # 'detectron_path': r'C:\Users\davijose\Documents\model_weights\model_with_flow_and_mask_no_stack.pth',
+        'detectron_path': r'C:\Users\davijose\Documents\model_weights\model_final_new.pth',
         'approach_duration': 10.0,
 
     }
